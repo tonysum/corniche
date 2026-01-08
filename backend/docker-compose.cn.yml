@@ -1,0 +1,48 @@
+version: '3.8'
+
+# 使用国内镜像源的 docker-compose 配置
+# 使用方法: docker-compose -f docker-compose.cn.yml up -d --build
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend.cn
+    container_name: crypto_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # 挂载数据库目录，确保数据持久化
+      - ./db:/app/db
+      # 挂载CSV文件目录（如果需要）
+      - ./backtrade_records:/app/backtrade_records
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - crypto_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.cn
+    container_name: crypto_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - crypto_network
+
+networks:
+  crypto_network:
+    driver: bridge
+
