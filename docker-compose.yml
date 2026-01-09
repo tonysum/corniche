@@ -57,19 +57,35 @@ services:
     networks:
       - crypto-network
 
-  frontend:
+  frontend-data:
     build:
-      context: ./frontend
+      context: ./frontend-data
       dockerfile: Dockerfile
-    container_name: frontend
+    container_name: frontend-data
     ports:
-      - "3000:3000"
+      - "3001:3001"
     environment:
       - NEXT_PUBLIC_DATA_SERVICE_URL=http://localhost:8001
       - NEXT_PUBLIC_BACKTEST_SERVICE_URL=http://localhost:8002
       - NEXT_PUBLIC_ORDER_SERVICE_URL=http://localhost:8003
     depends_on:
       - data-service
+    restart: unless-stopped
+    networks:
+      - crypto-network
+
+  frontend-backtrade:
+    build:
+      context: ./frontend-backtrade
+      dockerfile: Dockerfile
+    container_name: frontend-backtrade
+    ports:
+      - "3002:3002"
+    environment:
+      - NEXT_PUBLIC_DATA_SERVICE_URL=http://localhost:8001
+      - NEXT_PUBLIC_BACKTEST_SERVICE_URL=http://localhost:8002
+      - NEXT_PUBLIC_ORDER_SERVICE_URL=http://localhost:8003
+    depends_on:
       - backtest-service
       - order-service
     restart: unless-stopped

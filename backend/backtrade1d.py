@@ -401,6 +401,17 @@ def create_trade_table():
                     
                     conn.execute(text(f"ALTER TABLE {table_name} RENAME TO {temp_table_name};"))
                     conn.execute(text(text_create_new))
+                    
+                    # 检查旧表的列结构，确定哪些列存在
+                    result_old = conn.execute(
+                        text(f"PRAGMA table_info({temp_table_name});")
+                    )
+                    old_columns = {row[1]: row[0] for row in result_old.fetchall()}
+                    
+                    # 根据旧表的列结构构建 SELECT 语句
+                    # 如果旧表有 hold_days 列，使用它；否则使用 NULL
+                    hold_days_select = "hold_days" if "hold_days" in old_columns else "NULL"
+                    
                     conn.execute(text(f"""
                         INSERT INTO {table_name} 
                         (entry_date, symbol, entry_price, entry_pct_chg, position_size, leverage, 
@@ -409,7 +420,7 @@ def create_trade_table():
                         SELECT 
                         entry_date, symbol, entry_price, entry_pct_chg, position_size, leverage,
                         exit_date, exit_price, exit_reason, profit_loss, profit_loss_pct,
-                        max_profit, max_loss, hold_days, 
+                        max_profit, max_loss, {hold_days_select}, 
                         CASE WHEN has_added_position = 1 THEN 1 ELSE 0 END,
                         created_at
                         FROM {temp_table_name};

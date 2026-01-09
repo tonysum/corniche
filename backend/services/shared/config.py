@@ -20,7 +20,9 @@ ORDER_SERVICE_PORT = int(os.getenv("ORDER_SERVICE_PORT", "8003"))
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://localhost:3001",
+    "http://localhost:3001",  # 数据管理前端
     "http://127.0.0.1:3001",
+    "http://localhost:3002",  # 回测交易前端
+    "http://127.0.0.1:3002",
 ]
 

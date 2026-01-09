@@ -16,8 +16,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
@@ -1240,6 +1240,119 @@ async def health_check():
         "service": "数据管理服务",
         "port": DATA_SERVICE_PORT
     }
+
+
+@app.get("/api/download-database")
+async def download_database():
+    """
+    下载数据库文件 crypto_data.db
+    
+    返回数据库文件的二进制流，浏览器会自动下载到默认下载文件夹
+    文件名格式: crypto_data_YYYYMMDD_HHMMSS.db
+    """
+    from services.shared.config import DB_PATH
+    import os
+    
+    db_path = Path(DB_PATH)
+    
+    # 检查文件是否存在
+    if not db_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"数据库文件不存在: {db_path}"
+        )
+    
+    # 检查文件大小
+    file_size = db_path.stat().st_size
+    
+    # 生成带时间戳的文件名
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"crypto_data_{timestamp}.db"
+    
+    logging.info(f"下载数据库文件: {db_path}, 大小: {file_size} 字节")
+    
+    # 返回文件
+    return FileResponse(
+        path=str(db_path),
+        filename=filename,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(file_size)
+        }
+    )
+
+
+@app.post("/api/upload-database")
+async def upload_database(file: UploadFile = File(...)):
+    """
+    上传数据库文件到服务器的 data/tmp 文件夹
+    
+    参数:
+    - file: 上传的数据库文件（必须是 .db 文件）
+    
+    返回:
+    - 上传成功信息，包括文件路径和大小
+    """
+    from services.shared.config import DB_PATH
+    import shutil
+    
+    # 验证文件类型
+    if not file.filename or not file.filename.endswith('.db'):
+        raise HTTPException(
+            status_code=400,
+            detail="只能上传 .db 文件"
+        )
+    
+    # 确定目标目录（data/tmp）
+    db_path = Path(DB_PATH)
+    data_dir = db_path.parent  # data 目录
+    tmp_dir = data_dir / "tmp"
+    
+    # 创建 tmp 目录（如果不存在）
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 生成带时间戳的文件名
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    original_filename = file.filename or "crypto_data.db"
+    # 保留原始文件名，但添加时间戳
+    base_name = Path(original_filename).stem
+    extension = Path(original_filename).suffix
+    saved_filename = f"{base_name}_{timestamp}{extension}"
+    saved_path = tmp_dir / saved_filename
+    
+    try:
+        # 保存文件
+        with open(saved_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # 获取文件大小
+        file_size = saved_path.stat().st_size
+        file_size_mb = file_size / (1024 * 1024)
+        
+        logging.info(f"上传数据库文件成功: {saved_path}, 大小: {file_size} 字节 ({file_size_mb:.2f} MB)")
+        
+        return {
+            "status": "success",
+            "message": "数据库文件上传成功",
+            "filename": saved_filename,
+            "path": str(saved_path),
+            "size": file_size,
+            "size_mb": round(file_size_mb, 2),
+            "upload_time": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logging.error(f"上传数据库文件失败: {e}")
+        # 如果保存失败，尝试删除已创建的文件
+        if saved_path.exists():
+            try:
+                saved_path.unlink()
+            except:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"上传失败: {str(e)}"
+        )
 
 
 if __name__ == "__main__":
