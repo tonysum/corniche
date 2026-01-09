@@ -46,3 +46,6 @@ backtrade_records/
 
 # Ubuntu
 ubuntu/
+
+#pem
+*.pem
