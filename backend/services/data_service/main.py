@@ -1242,13 +1242,15 @@ async def health_check():
     }
 
 
-@app.get("/api/download-database")
+@app.get("/api/download-database", response_class=FileResponse)
 async def download_database():
     """
     下载数据库文件 crypto_data.db
     
     返回数据库文件的二进制流，浏览器会自动下载到默认下载文件夹
     文件名格式: crypto_data_YYYYMMDD_HHMMSS.db
+    
+    注意：在 Swagger UI 中可能无法直接下载，建议直接在浏览器中访问此 URL
     """
     from services.shared.config import DB_PATH
     import os
@@ -1265,11 +1267,17 @@ async def download_database():
     # 检查文件大小
     file_size = db_path.stat().st_size
     
+    if file_size == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"数据库文件为空: {db_path}"
+        )
+    
     # 生成带时间戳的文件名
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"crypto_data_{timestamp}.db"
     
-    logging.info(f"下载数据库文件: {db_path}, 大小: {file_size} 字节")
+    logging.info(f"下载数据库文件: {db_path}, 大小: {file_size} 字节 ({file_size / (1024*1024):.2f} MB)")
     
     # 返回文件
     return FileResponse(
