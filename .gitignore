@@ -44,3 +44,5 @@ backtrade_records/
 # Docker
 .dockerignore
 
+# Ubuntu
+ubuntu/
