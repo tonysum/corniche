@@ -5,11 +5,31 @@ import { API_URLS } from '../lib/api-config'
 
 const API_BASE_URL = API_URLS.data
 
+const INTERVALS = [
+  { value: '1m', label: '1分钟' },
+  { value: '3m', label: '3分钟' },
+  { value: '5m', label: '5分钟' },
+  { value: '15m', label: '15分钟' },
+  { value: '30m', label: '30分钟' },
+  { value: '1h', label: '1小时' },
+  { value: '2h', label: '2小时' },
+  { value: '4h', label: '4小时' },
+  { value: '6h', label: '6小时' },
+  { value: '8h', label: '8小时' },
+  { value: '12h', label: '12小时' },
+  { value: '1d', label: '1天' },
+  { value: '3d', label: '3天' },
+  { value: '1w', label: '1周' },
+  { value: '1M', label: '1月' },
+]
+
 export default function DatabaseFileManager() {
   const [downloadingDb, setDownloadingDb] = useState(false)
   const [uploadingDb, setUploadingDb] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [autoUpdating, setAutoUpdating] = useState(false)
+  const [selectedInterval, setSelectedInterval] = useState('1d')
 
   const handleDownloadDatabase = async () => {
     setDownloadingDb(true)
@@ -109,6 +129,64 @@ export default function DatabaseFileManager() {
       })
     } finally {
       setUploadingDb(false)
+    }
+  }
+
+  const handleAutoUpdate = async () => {
+    setAutoUpdating(true)
+    setMessage(null)
+
+    try {
+      const payload = {
+        interval: selectedInterval,
+        auto_split: true,
+        request_delay: 0.1,
+        batch_size: 30,
+        batch_delay: 3.0,
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/auto-update`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+
+      if (!response.ok) {
+        let errorDetail = '自动补全失败'
+        try {
+          const errorData = await response.json()
+          errorDetail = errorData.detail || errorData.message || `HTTP ${response.status}`
+        } catch {
+          errorDetail = `HTTP ${response.status}: ${response.statusText}`
+        }
+        throw new Error(errorDetail)
+      }
+
+      const data = await response.json()
+      setMessage({
+        type: 'success',
+        text: data.message || '自动补全任务已启动',
+      })
+    } catch (error: any) {
+      console.error('自动补全错误:', error)
+      let errorMessage = '请求失败'
+      
+      if (error.message) {
+        errorMessage = error.message
+      } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        errorMessage = `无法连接到后端服务器 (${API_BASE_URL})。请确保后端服务已启动。`
+      } else {
+        errorMessage = `请求失败: ${error.toString()}`
+      }
+      
+      setMessage({
+        type: 'error',
+        text: errorMessage,
+      })
+    } finally {
+      setAutoUpdating(false)
     }
   }
 
@@ -233,7 +311,12 @@ export default function DatabaseFileManager() {
             <p>• 文件名格式: 原文件名_YYYYMMDD_HHMMSS.db</p>
           </div>
         </div>
+
+
+
+
       </div>
+
 
       {/* 使用说明 */}
       <div className="p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
@@ -243,7 +326,66 @@ export default function DatabaseFileManager() {
           <li>• <strong>上传</strong>: 将数据库文件上传到服务器的临时文件夹，可用于恢复或替换数据库</li>
           <li>• 上传的文件保存在 data/tmp/ 目录，不会自动替换当前使用的数据库</li>
           <li>• 如需替换当前数据库，请手动将上传的文件移动到 data/ 目录并重命名为 crypto_data.db</li>
+          <li>• <strong>自动补全</strong>: 自动检测并补全所有交易对的数据，从最后更新日期到当前时间</li>
         </ul>
+      </div>
+      
+      {/* 自动补全功能 */}
+      <div className="p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+        <div className="bg-gray-800/80 p-6 rounded-lg border border-gray-700">
+          <div className="mb-4">
+            <h3 className="text-xl font-bold mb-3 text-green-400 flex items-center gap-2">
+              <span>🚀</span>
+              <span>自动补全数据</span>
+            </h3>
+            <p className="text-sm text-gray-300 mb-4 leading-relaxed">
+              自动检测所有交易对的最后更新日期，并从最后日期补全到当前时间。
+              <br />
+              对于没有数据的交易对，将从默认开始时间下载。
+            </p>
+          </div>
+          
+          {/* 间隔选择器 */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium mb-2 text-gray-300">
+              选择K线间隔
+            </label>
+            <select
+              value={selectedInterval}
+              onChange={(e) => setSelectedInterval(e.target.value)}
+              disabled={autoUpdating || downloadingDb || uploadingDb}
+              className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-white"
+            >
+              {INTERVALS.map((interval) => (
+                <option key={interval.value} value={interval.value}>
+                  {interval.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleAutoUpdate}
+            disabled={autoUpdating || downloadingDb || uploadingDb}
+            className={`w-full py-4 px-6 rounded-lg font-semibold text-lg transition-all transform ${
+              autoUpdating || downloadingDb || uploadingDb
+                ? 'bg-gray-600 cursor-not-allowed text-gray-400'
+                : 'bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white shadow-lg hover:shadow-xl hover:scale-[1.02]'
+            }`}
+            style={{
+              minHeight: '50px',
+              display: 'block',
+              visibility: 'visible',
+              opacity: autoUpdating || downloadingDb || uploadingDb ? 0.6 : 1
+            }}
+          >
+            {autoUpdating ? '⏳ 自动补全中...' : '🚀 一键自动补全数据'}
+          </button>
+          <p className="text-xs text-gray-400 mt-4 text-center">
+            将根据选择的K线间隔（<span className="text-green-400 font-semibold">{INTERVALS.find(i => i.value === selectedInterval)?.label || selectedInterval}</span>）自动补全所有交易对的数据
+          </p>
+        </div>
       </div>
     </div>
   )

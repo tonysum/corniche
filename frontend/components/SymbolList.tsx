@@ -54,11 +54,20 @@ export default function SymbolList() {
 
   const INTERVALS = [
     { value: '1m', label: '1分钟' },
+    { value: '3m', label: '3分钟' },
     { value: '5m', label: '5分钟' },
     { value: '15m', label: '15分钟' },
+    { value: '30m', label: '30分钟' },
     { value: '1h', label: '1小时' },
+    { value: '2h', label: '2小时' },
     { value: '4h', label: '4小时' },
+    { value: '6h', label: '6小时' },
+    { value: '8h', label: '8小时' },
+    { value: '12h', label: '12小时' },
     { value: '1d', label: '1天' },
+    { value: '3d', label: '3天' },
+    { value: '1w', label: '1周' },
+    { value: '1M', label: '1月' },
   ]
 
   return (

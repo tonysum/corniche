@@ -121,7 +121,7 @@ from typing import List, Optional, Dict, Tuple
 from sqlalchemy import text  # pyright: ignore[reportMissingImports]
 
 from db import engine, create_table
-from data import get_local_symbols, get_local_kline_data
+from data import get_local_symbols, get_local_kline_data, get_kline_data_for_date
 
 # 配置日志
 logging.basicConfig(
@@ -738,47 +738,6 @@ def check_risk_control(symbol: str, entry_pct_chg: float) -> dict:
     return result
 
 
-"""
-效果最佳的回测数据startdate2021-12-01 enddate2026-01-03
-INITIAL_CAPITAL = 10000  # 初始资金10000美金
-LEVERAGE = 3  # 三倍杠杆
-PROFIT_THRESHOLD = 0.25   # 止盈25%（建仓价格盈利25%）
-POSITION_SIZE_RATIO = 0.03  # 每次建仓金额为账户余额的3%
-MIN_PCT_CHG = 0.1  # 最小涨幅15%才建仓
---------------------------------
-INITIAL_CAPITAL = 10000  # 初始资金10000美金
-LEVERAGE = 3  # 三倍杠杆
-PROFIT_THRESHOLD = 0.26   # 止盈25%（建仓价格盈利25%）
-POSITION_SIZE_RATIO = 0.03  # 每次建仓金额为账户余额的3%
-MIN_PCT_CHG = 0.1 
-INFO:root:成功保存 1097 条交易记录到CSV文件: backtrade_records_2021-12-01_2026-01-03.csv
-INFO:root:============================================================
-INFO:root:回测统计:
-INFO:root:初始资金: 10000.00 USDT
-INFO:root:最终资金: 22394.13 USDT
-INFO:root:总盈亏: 12394.13 USDT
-INFO:root:总收益率: 123.94%
-INFO:root:交易次数: 1097
-INFO:root:盈利次数: 627
-INFO:root:亏损次数: 470
-INFO:root:胜率: 57.16%
-INFO:root:============================================================
-
-
-补仓或第一次回测
-INFO:root:成功保存 1012 条交易记录到CSV文件: backtrade_records_2021-12-01_2026-01-03.csv
-INFO:root:============================================================
-INFO:root:回测统计:
-INFO:root:初始资金: 10000.00 USDT
-INFO:root:最终资金: 67149.01 USDT
-INFO:root:总盈亏: 57149.01 USDT
-INFO:root:总收益率: 571.49%
-INFO:root:交易次数: 1012
-INFO:root:盈利次数: 788
-INFO:root:亏损次数: 224
-INFO:root:胜率: 77.87%
-INFO:root:============================================================
-"""
 
 def get_top_gainer_by_date(date: str) -> Optional[Tuple[str, float]]:
     """
@@ -938,51 +897,6 @@ def get_all_top_gainers(start_date: str, end_date: str) -> pd.DataFrame:
     return top_gainers[['date', 'symbol', 'pct_chg']]
 
 
-def get_kline_data_for_date(symbol: str, date: str) -> Optional[pd.Series]:
-    """
-    获取指定交易对在指定日期的K线数据
-    
-    Args:
-        symbol: 交易对符号
-        date: 日期字符串 'YYYY-MM-DD'
-    
-    Returns:
-        Series包含该日期的K线数据，或None
-    """
-    try:
-        df = get_local_kline_data(symbol)
-        if df.empty:
-            return None
-        
-        # 将trade_date转换为日期字符串格式进行比较（处理多种日期格式）
-        # 如果已经是字符串格式，先提取日期部分；如果是datetime，直接转换
-        if df['trade_date'].dtype == 'object':
-            # 字符串格式，提取日期部分
-            df['trade_date_str'] = df['trade_date'].str[:10]
-        else:
-            # datetime格式
-            df['trade_date_str'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
-        
-        date_data = df[df['trade_date_str'] == date]
-        if date_data.empty:
-            return None
-        
-        return date_data.iloc[0]
-    except Exception as e:
-        logging.error(f"获取 {symbol} 在 {date} 的K线数据失败: {e}")
-        return None
-
-
-def get_hourly_kline_data(symbol: str) -> pd.DataFrame:
-    """获取本地数据库中指定交易对的小时K线数据"""
-    # 使用项目标准的数据获取函数和表名格式 K1h{symbol}
-    try:
-        df = get_local_kline_data(symbol, interval="1h")
-        return df
-    except Exception as e:
-        logging.warning(f"获取 {symbol} 小时K线数据失败: {e}")
-        return pd.DataFrame()
-
 
 def get_24h_quote_volume(symbol: str, entry_datetime: str) -> float:
     """
@@ -1071,7 +985,7 @@ def find_entry_trigger_point(symbol: str, open_price: float, start_date: str,
     
     try:
         # 获取小时K线数据
-        hourly_df = get_hourly_kline_data(symbol)
+        hourly_df = get_local_kline_data(symbol, interval="1h")
         if hourly_df.empty:
             return result
         
@@ -1164,7 +1078,7 @@ def check_position_hourly(position: dict, current_capital: float, end_date: str)
     
     try:
         # 获取小时K线数据
-        hourly_df = get_hourly_kline_data(symbol)
+        hourly_df = get_local_kline_data(symbol, interval="1h")
         if hourly_df.empty:
             return result
         
@@ -1366,7 +1280,7 @@ def check_daily_hourly_exit_safe(position: dict, check_date: str) -> dict:
             return result
 
         # 持有满24小时后，根据建仓后24小时的整体走势决定是否平仓
-        hourly_df = get_hourly_kline_data(symbol)
+        hourly_df = get_local_kline_data(symbol, interval="1h")
         if not hourly_df.empty:
             # 预先筛选出相关时间范围的数据，避免每次循环都搜索整个DataFrame
             start_time = entry_dt
@@ -1981,6 +1895,7 @@ def simulate_trading(start_date: str, end_date: str):
             else:
                 logging.debug(f"{date_str}: {symbol} 涨幅 {pct_chg:.2f}% < {MIN_PCT_CHG*100:.0f}%，不建仓")
         
+        # 日期循环递增 - 每天推进一次
         current_date += timedelta(days=1)
     
     # 如果最后还有持仓，以最后一天的收盘价平仓
@@ -1995,7 +1910,7 @@ def simulate_trading(start_date: str, end_date: str):
             
             # 使用小时线数据获取最后一天的收盘价
             try:
-                hourly_df = get_hourly_kline_data(symbol)
+                hourly_df = get_local_kline_data(symbol, interval="1h")
                 if not hourly_df.empty:
                     # 获取最后一天的小时数据，取最后一根K线的收盘价
                     last_date_data = hourly_df[hourly_df['trade_date'].str[:10] == last_date_str]
@@ -2226,3 +2141,59 @@ if __name__ == "__main__":
         exit(1)
     
     simulate_trading(args.start_date, args.end_date)
+
+
+# ============================================================================
+# SmartMoneyBacktest 类（用于API接口调用）
+# ============================================================================
+class SmartMoneyBacktest:
+    """聪明钱策略回测器（包装类）"""
+    
+    def __init__(self):
+        self.initial_capital = INITIAL_CAPITAL
+        self.position_size_ratio = POSITION_SIZE_RATIO
+        self.min_pct_chg = MIN_PCT_CHG
+        self.enable_dynamic_leverage = ENABLE_DYNAMIC_LEVERAGE
+        self.enable_long_trade = ENABLE_LONG_TRADE
+        self.trade_direction = TRADE_DIRECTION
+        self.enable_volume_position_sizing = ENABLE_VOLUME_POSITION_SIZING
+        self.enable_risk_control = ENABLE_RISK_CONTROL
+        self.entry_rise_threshold = ENTRY_RISE_THRESHOLD
+        self.entry_wait_hours = ENTRY_WAIT_HOURS
+    
+    def run_backtest(self, start_date: str, end_date: str):
+        global INITIAL_CAPITAL, POSITION_SIZE_RATIO, MIN_PCT_CHG
+        global ENABLE_DYNAMIC_LEVERAGE, ENABLE_LONG_TRADE, TRADE_DIRECTION
+        global ENABLE_VOLUME_POSITION_SIZING, ENABLE_RISK_CONTROL
+        global ENTRY_RISE_THRESHOLD, ENTRY_WAIT_HOURS
+        
+        old_values = {
+            'INITIAL_CAPITAL': INITIAL_CAPITAL,
+            'POSITION_SIZE_RATIO': POSITION_SIZE_RATIO,
+            'MIN_PCT_CHG': MIN_PCT_CHG,
+            'ENABLE_DYNAMIC_LEVERAGE': ENABLE_DYNAMIC_LEVERAGE,
+            'ENABLE_LONG_TRADE': ENABLE_LONG_TRADE,
+            'TRADE_DIRECTION': TRADE_DIRECTION,
+            'ENABLE_VOLUME_POSITION_SIZING': ENABLE_VOLUME_POSITION_SIZING,
+            'ENABLE_RISK_CONTROL': ENABLE_RISK_CONTROL,
+            'ENTRY_RISE_THRESHOLD': ENTRY_RISE_THRESHOLD,
+            'ENTRY_WAIT_HOURS': ENTRY_WAIT_HOURS,
+        }
+        
+        try:
+            INITIAL_CAPITAL = self.initial_capital
+            POSITION_SIZE_RATIO = self.position_size_ratio
+            MIN_PCT_CHG = self.min_pct_chg
+            ENABLE_DYNAMIC_LEVERAGE = self.enable_dynamic_leverage
+            ENABLE_LONG_TRADE = self.enable_long_trade
+            TRADE_DIRECTION = self.trade_direction
+            ENABLE_VOLUME_POSITION_SIZING = self.enable_volume_position_sizing
+            ENABLE_RISK_CONTROL = self.enable_risk_control
+            ENTRY_RISE_THRESHOLD = self.entry_rise_threshold
+            ENTRY_WAIT_HOURS = self.entry_wait_hours
+            
+            result = simulate_trading(start_date, end_date)
+            return result
+        finally:
+            for key, value in old_values.items():
+                globals()[key] = value

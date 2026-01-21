@@ -19,15 +19,105 @@ else
     echo "启动微服务..."
 fi
 
+# 检查并激活 conda 环境 "tiger"
+PYTHON_CMD="python3"
+USE_CONDA_RUN=false
+
+if command -v conda &> /dev/null; then
+    # 初始化 conda（如果还没有初始化）
+    if [[ -z "$CONDA_DEFAULT_ENV" ]]; then
+        # 尝试常见的 conda 初始化路径
+        if [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+            source "$HOME/miniconda3/etc/profile.d/conda.sh"
+        elif [[ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]]; then
+            source "$HOME/anaconda3/etc/profile.d/conda.sh"
+        elif [[ -f "/opt/conda/etc/profile.d/conda.sh" ]]; then
+            source "/opt/conda/etc/profile.d/conda.sh"
+        else
+            # 尝试通过 conda info 获取 base 路径
+            CONDA_BASE=$(conda info --base 2>/dev/null)
+            if [[ -n "$CONDA_BASE" ]] && [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+                source "$CONDA_BASE/etc/profile.d/conda.sh"
+            fi
+        fi
+    fi
+    
+    # 检查当前是否已经激活了 "tiger" 环境
+    if [[ "$CONDA_DEFAULT_ENV" != "tiger" ]]; then
+        echo "检测到 conda，正在激活环境 'tiger'..."
+        # 尝试激活 conda 环境
+        if [[ -n "$CONDA_PREFIX" ]] || command -v conda &> /dev/null; then
+            # 确保 conda 函数可用
+            if [[ -z "$(type -t conda)" ]] || [[ "$(type -t conda)" != "function" ]]; then
+                CONDA_BASE=$(conda info --base 2>/dev/null)
+                if [[ -n "$CONDA_BASE" ]] && [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+                    source "$CONDA_BASE/etc/profile.d/conda.sh"
+                fi
+            fi
+            
+            # 尝试激活环境
+            conda activate tiger 2>/dev/null
+            if [[ $? -eq 0 ]] && [[ "$CONDA_DEFAULT_ENV" == "tiger" ]]; then
+                echo "已激活 conda 环境: tiger"
+                # 获取激活环境后的 Python 路径（使用完整路径以确保后台进程也能使用）
+                PYTHON_CMD="$(which python)"
+                if [[ -z "$PYTHON_CMD" ]]; then
+                    PYTHON_CMD="$(conda run -n tiger which python 2>/dev/null || echo "python3")"
+                fi
+            else
+                echo "警告: 无法直接激活 conda 环境 'tiger'，将使用 conda run 运行命令"
+                USE_CONDA_RUN=true
+                PYTHON_CMD="conda run -n tiger python"
+            fi
+        else
+            echo "警告: conda 未正确初始化，将使用 conda run 运行命令"
+            USE_CONDA_RUN=true
+            PYTHON_CMD="conda run -n tiger python"
+        fi
+    else
+        echo "conda 环境 'tiger' 已激活"
+        PYTHON_CMD="$(which python)"
+        if [[ -z "$PYTHON_CMD" ]]; then
+            PYTHON_CMD="python3"
+        fi
+    fi
+else
+    echo "未检测到 conda，跳过环境激活"
+fi
+
+# 验证 Python 命令是否可用
+if [[ "$USE_CONDA_RUN" == false ]]; then
+    if ! command -v "$PYTHON_CMD" &> /dev/null && ! "$PYTHON_CMD" --version &> /dev/null 2>&1; then
+        echo "警告: 无法使用指定的 Python 命令 '$PYTHON_CMD'，回退到 python3"
+        PYTHON_CMD="python3"
+    fi
+fi
+
+echo "使用 Python: $PYTHON_CMD"
+
 # 检查Python是否安装
-if ! command -v python3 &> /dev/null; then
-    echo "错误: 未找到 python3"
-    exit 1
+if [[ "$USE_CONDA_RUN" == true ]]; then
+    # 如果使用 conda run，验证 conda 和 tiger 环境是否存在
+    if ! conda env list | grep -q "tiger"; then
+        echo "错误: conda 环境 'tiger' 不存在"
+        echo "请创建环境: conda create -n tiger python=3.x"
+        exit 1
+    fi
+    # 测试 conda run 是否工作
+    if ! conda run -n tiger python --version &> /dev/null; then
+        echo "错误: 无法在 conda 环境 'tiger' 中运行 Python"
+        exit 1
+    fi
+else
+    if ! command -v "$PYTHON_CMD" &> /dev/null && ! "$PYTHON_CMD" --version &> /dev/null 2>&1; then
+        echo "错误: 未找到 Python 解释器: $PYTHON_CMD"
+        exit 1
+    fi
 fi
 
 # 检查uvicorn是否安装（如果使用--reload需要）
 if [[ -n "$RELOAD_FLAG" ]]; then
-    if ! python3 -c "import uvicorn" &> /dev/null; then
+    if ! "$PYTHON_CMD" -c "import uvicorn" &> /dev/null; then
         echo "错误: 未找到 uvicorn，无法使用 --reload 参数"
         echo "请安装: pip install uvicorn[standard]"
         exit 1
@@ -43,11 +133,11 @@ echo "启动数据管理服务 (端口 8001)..."
 if [[ -n "$RELOAD_FLAG" ]]; then
     # 使用 uvicorn 命令行启动，支持 --reload
     # 注意：需要在backend目录下运行，因为服务文件中有路径设置
-    python3 -m uvicorn services.data_service.main:app --host 0.0.0.0 --port 8001 $RELOAD_FLAG &
+    "$PYTHON_CMD" -m uvicorn services.data_service.main:app --host 0.0.0.0 --port 8001 $RELOAD_FLAG &
     DATA_SERVICE_PID=$!
 else
     # 直接运行 Python 文件
-    python3 services/data_service/main.py &
+    "$PYTHON_CMD" services/data_service/main.py &
     DATA_SERVICE_PID=$!
 fi
 
@@ -58,11 +148,11 @@ sleep 2
 echo "启动回测服务 (端口 8002)..."
 if [[ -n "$RELOAD_FLAG" ]]; then
     # 使用 uvicorn 命令行启动，支持 --reload
-    python3 -m uvicorn services.backtest_service.main:app --host 0.0.0.0 --port 8002 $RELOAD_FLAG &
+    "$PYTHON_CMD" -m uvicorn services.backtest_service.main:app --host 0.0.0.0 --port 8002 $RELOAD_FLAG &
     BACKTEST_SERVICE_PID=$!
 else
     # 直接运行 Python 文件
-    python3 services/backtest_service/main.py &
+    "$PYTHON_CMD" services/backtest_service/main.py &
     BACKTEST_SERVICE_PID=$!
 fi
 
@@ -73,11 +163,11 @@ sleep 2
 echo "启动订单服务 (端口 8003)..."
 if [[ -n "$RELOAD_FLAG" ]]; then
     # 使用 uvicorn 命令行启动，支持 --reload
-    python3 -m uvicorn services.order_service.main:app --host 0.0.0.0 --port 8003 $RELOAD_FLAG &
+    "$PYTHON_CMD" -m uvicorn services.order_service.main:app --host 0.0.0.0 --port 8003 $RELOAD_FLAG &
     ORDER_SERVICE_PID=$!
 else
     # 直接运行 Python 文件
-    python3 services/order_service/main.py &
+    "$PYTHON_CMD" services/order_service/main.py &
     ORDER_SERVICE_PID=$!
 fi
 

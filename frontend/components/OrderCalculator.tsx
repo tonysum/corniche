@@ -24,6 +24,16 @@ interface TopGainer24h {
   volume: number | null
 }
 
+interface TopGainerBinance {
+  symbol: string
+  pct_chg: number
+  open: number
+  close: number
+  high: number
+  low: number
+  volume: number
+}
+
 interface OrderResult {
   entry_price: number | string
   stop_loss_price: number | string
@@ -43,8 +53,11 @@ export default function OrderCalculator() {
   const { topGainers, topGainersDate, loading: loadingTopGainers } = useTopGainers()
   const [topGainers24h, setTopGainers24h] = useState<TopGainer24h[]>([])
   const [loadingTopGainers24h, setLoadingTopGainers24h] = useState(false)
+  const [topGainersBinance, setTopGainersBinance] = useState<TopGainerBinance[]>([])
+  const [loadingTopGainersBinance, setLoadingTopGainersBinance] = useState(false)
   const [selectedGainer, setSelectedGainer] = useState<TopGainer | null>(null)
   const [selectedGainer24h, setSelectedGainer24h] = useState<TopGainer24h | null>(null)
+  const [selectedGainerBinance, setSelectedGainerBinance] = useState<TopGainerBinance | null>(null)
 
   const calculateOrder = async () => {
     setError('')
@@ -121,7 +134,8 @@ export default function OrderCalculator() {
   useEffect(() => {
     const hasValidData = 
       (selectedGainer && selectedGainer.close !== null) || 
-      (selectedGainer24h && selectedGainer24h.last_price !== null)
+      (selectedGainer24h && selectedGainer24h.last_price !== null) ||
+      (selectedGainerBinance && selectedGainerBinance.close !== null)
     
     if (hasValidData && price && entryPctChg && lossThreshold && profitThreshold) {
       // 延迟一下确保所有状态都已更新
@@ -131,7 +145,7 @@ export default function OrderCalculator() {
       return () => clearTimeout(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedGainer, selectedGainer24h, price, entryPctChg, lossThreshold, profitThreshold, orderType])
+  }, [selectedGainer, selectedGainer24h, selectedGainerBinance, price, entryPctChg, lossThreshold, profitThreshold, orderType])
 
   // 处理点击前一天涨幅交易对
   const handleGainerClick = (gainer: TopGainer) => {
@@ -147,10 +161,20 @@ export default function OrderCalculator() {
   const handleGainer24hClick = (gainer: TopGainer24h) => {
     setSelectedGainer24h(gainer)
     setSelectedGainer(null) // 清除前一天涨幅的选中状态
+    setSelectedGainerBinance(null) // 清除交易所数据的选中状态
     // 设置价格，建仓涨幅保持用户设定的值
     if (gainer.last_price !== null) {
       setPrice(gainer.last_price.toFixed(8))
     }
+  }
+
+  // 处理点击交易所API计算的前一天涨幅交易对
+  const handleGainerBinanceClick = (gainer: TopGainerBinance) => {
+    setSelectedGainerBinance(gainer)
+    setSelectedGainer(null) // 清除前一天涨幅的选中状态
+    setSelectedGainer24h(null) // 清除24小时涨幅的选中状态
+    // 设置价格，建仓涨幅保持用户设定的值
+    setPrice(gainer.close.toFixed(8))
   }
 
   // 获取过去24小时涨幅前三
@@ -173,6 +197,7 @@ export default function OrderCalculator() {
           const topGainer24h = gainers24h[0]
           setSelectedGainer24h(topGainer24h)
           setSelectedGainer(null) // 清除前一天涨幅的选中状态
+          setSelectedGainerBinance(null) // 清除交易所数据的选中状态
           // 使用最新价作为当前价格
           if (topGainer24h.last_price !== null) {
             setPrice(topGainer24h.last_price.toFixed(8))
@@ -188,6 +213,31 @@ export default function OrderCalculator() {
     }
     
     fetchTopGainers24h()
+  }, [])
+
+  // 获取前一天涨幅排名（交易所API计算）
+  useEffect(() => {
+    const fetchTopGainersBinance = async () => {
+      setLoadingTopGainersBinance(true)
+      try {
+        const response = await fetch(`${API_URLS.data}/api/top-gainers-prev-day-binance?top_n=3`)
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`)
+        }
+        const data = await response.json()
+        console.log('交易所API前一天涨幅数据:', data)
+        const gainersBinance = data.top_gainers || []
+        setTopGainersBinance(gainersBinance)
+      } catch (err) {
+        console.error('获取交易所API前一天涨幅排名失败:', err)
+        setTopGainersBinance([])
+      } finally {
+        setLoadingTopGainersBinance(false)
+      }
+    }
+    
+    fetchTopGainersBinance()
   }, [])
 
   return (
@@ -342,6 +392,79 @@ export default function OrderCalculator() {
             ))}
           </div>
         ) : !loadingTopGainers ? (
+          <div className="text-center py-2 text-gray-400 text-sm">
+            暂无数据
+          </div>
+        ) : null}
+      </div>
+
+      {/* 前一天涨幅前三（交易所API计算） */}
+      <div className="bg-gradient-to-r from-orange-900/50 to-amber-900/50 rounded-lg p-3 border border-orange-700/50">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-base font-semibold">
+            前一天涨幅前三 (交易所数据计算)
+          </h3>
+          {loadingTopGainersBinance && (
+            <span className="text-sm text-gray-400">加载中...</span>
+          )}
+        </div>
+        
+        {topGainersBinance.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            {topGainersBinance.map((gainer, index) => (
+              <div
+                key={gainer.symbol}
+                onClick={() => handleGainerBinanceClick(gainer)}
+                className={`bg-gray-800/70 rounded-lg p-2 border cursor-pointer transition-all hover:scale-105 ${
+                  selectedGainerBinance?.symbol === gainer.symbol
+                    ? 'border-blue-500 shadow-lg shadow-blue-500/30 ring-2 ring-blue-400'
+                    : index === 0
+                    ? 'border-yellow-500/50 shadow-lg shadow-yellow-500/20'
+                    : index === 1
+                    ? 'border-gray-500/50'
+                    : 'border-gray-600/50'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center space-x-2">
+                    <span className={`text-lg font-bold ${
+                      index === 0 ? 'text-yellow-400' : 'text-gray-300'
+                    }`}>
+                      #{index + 1}
+                    </span>
+                    <span className="font-semibold text-white">{gainer.symbol}</span>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-gray-400 text-sm">涨幅:</span>
+                    <span className="text-green-400 font-bold">
+                      +{gainer.pct_chg.toFixed(2)}%
+                    </span>
+                  </div>
+                  {gainer.close && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-400 text-sm">收盘价:</span>
+                      <span className="text-gray-300">{gainer.close.toFixed(8)}</span>
+                    </div>
+                  )}
+                  {gainer.volume && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-400 text-sm">成交量:</span>
+                      <span className="text-gray-300">
+                        {gainer.volume >= 1000000
+                          ? `${(gainer.volume / 1000000).toFixed(2)}M`
+                          : gainer.volume >= 1000
+                          ? `${(gainer.volume / 1000).toFixed(2)}K`
+                          : gainer.volume.toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : !loadingTopGainersBinance ? (
           <div className="text-center py-2 text-gray-400 text-sm">
             暂无数据
           </div>

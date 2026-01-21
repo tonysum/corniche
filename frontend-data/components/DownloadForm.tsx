@@ -39,6 +39,7 @@ export default function DownloadForm() {
     batchDelay: 3.0,
   })
   const [loading, setLoading] = useState(false)
+  const [autoUpdating, setAutoUpdating] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
@@ -121,6 +122,65 @@ export default function DownloadForm() {
       })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleAutoUpdate = async () => {
+    setAutoUpdating(true)
+    setMessage(null)
+
+    try {
+      const payload = {
+        interval: formData.interval,
+        limit: formData.limit ? parseInt(formData.limit) : undefined,
+        auto_split: formData.autoSplit,
+        request_delay: formData.requestDelay,
+        batch_size: formData.batchSize,
+        batch_delay: formData.batchDelay,
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/auto-update`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+
+      if (!response.ok) {
+        let errorDetail = '自动补全失败'
+        try {
+          const errorData = await response.json()
+          errorDetail = errorData.detail || errorData.message || `HTTP ${response.status}`
+        } catch {
+          errorDetail = `HTTP ${response.status}: ${response.statusText}`
+        }
+        throw new Error(errorDetail)
+      }
+
+      const data = await response.json()
+      setMessage({
+        type: 'success',
+        text: data.message || '自动补全任务已启动',
+      })
+    } catch (error: any) {
+      console.error('自动补全错误:', error)
+      let errorMessage = '请求失败'
+      
+      if (error.message) {
+        errorMessage = error.message
+      } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        errorMessage = `无法连接到后端服务器 (${API_BASE_URL})。请确保后端服务已启动。`
+      } else {
+        errorMessage = `请求失败: ${error.toString()}`
+      }
+      
+      setMessage({
+        type: 'error',
+        text: errorMessage,
+      })
+    } finally {
+      setAutoUpdating(false)
     }
   }
 
@@ -332,9 +392,9 @@ export default function DownloadForm() {
         {/* 提交按钮 */}
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || autoUpdating}
           className={`w-full py-3 px-6 rounded-lg font-medium transition-colors ${
-            loading
+            loading || autoUpdating
               ? 'bg-gray-600 cursor-not-allowed'
               : 'bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700'
           }`}
@@ -342,6 +402,45 @@ export default function DownloadForm() {
           {loading ? '下载中...' : '开始下载'}
         </button>
       </form>
+
+      {/* 自动补全功能 */}
+      <div className="mt-8 pt-8 border-t-2 border-gray-600">
+        <div className="p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+          <div className="mb-4">
+            <h3 className="text-xl font-bold mb-3 text-green-400 flex items-center gap-2">
+              <span>🚀</span>
+              <span>自动补全数据</span>
+            </h3>
+            <p className="text-sm text-gray-300 mb-4 leading-relaxed">
+              自动检测所有交易对的最后更新日期，并从最后日期补全到当前时间。
+              <br />
+              对于没有数据的交易对，将从默认开始时间下载。
+            </p>
+          </div>
+          
+          <button
+            type="button"
+            onClick={handleAutoUpdate}
+            disabled={loading || autoUpdating}
+            className={`w-full py-4 px-6 rounded-lg font-semibold text-lg transition-all transform ${
+              autoUpdating || loading
+                ? 'bg-gray-600 cursor-not-allowed text-gray-400'
+                : 'bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white shadow-lg hover:shadow-xl hover:scale-[1.02]'
+            }`}
+            style={{
+              minHeight: '50px',
+              display: 'block',
+              visibility: 'visible',
+              opacity: autoUpdating || loading ? 0.6 : 1
+            }}
+          >
+            {autoUpdating ? '⏳ 自动补全中...' : '🚀 一键自动补全数据'}
+          </button>
+          <p className="text-xs text-gray-400 mt-4 text-center">
+            将根据当前选择的K线间隔（<span className="text-green-400 font-semibold">{INTERVALS.find(i => i.value === formData.interval)?.label || formData.interval}</span>）自动补全所有交易对的数据
+          </p>
+        </div>
+      </div>
     </div>
   )
 }

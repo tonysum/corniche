@@ -355,13 +355,27 @@ export default function DataIntegrityChecker() {
               onChange={(e) => setInterval(e.target.value)}
               className="w-full px-4 py-2 bg-gray-600 border border-gray-500 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-white"
             >
-              <option value="1d">1日</option>
-              <option value="1h">1小时</option>
-              <option value="4h">4小时</option>
-              <option value="1m">1分钟</option>
-              <option value="5m">5分钟</option>
-              <option value="15m">15分钟</option>
-              <option value="30m">30分钟</option>
+              <optgroup label="分钟">
+                <option value="1m">1分钟</option>
+                <option value="3m">3分钟</option>
+                <option value="5m">5分钟</option>
+                <option value="15m">15分钟</option>
+                <option value="30m">30分钟</option>
+              </optgroup>
+              <optgroup label="小时">
+                <option value="1h">1小时</option>
+                <option value="2h">2小时</option>
+                <option value="4h">4小时</option>
+                <option value="6h">6小时</option>
+                <option value="8h">8小时</option>
+                <option value="12h">12小时</option>
+              </optgroup>
+              <optgroup label="日/周/月">
+                <option value="1d">1日</option>
+                <option value="3d">3日</option>
+                <option value="1w">1周</option>
+                <option value="1M">1月</option>
+              </optgroup>
             </select>
           </div>
 

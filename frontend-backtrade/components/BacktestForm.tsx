@@ -16,10 +16,11 @@ interface BacktestResult {
   short_trades?: number
   strategy?: string
   csv_filename?: string
+  max_drawdown?: number
 }
 
 export default function BacktestForm() {
-  const [backtestType, setBacktestType] = useState<'standard' | 'smartmoney'>('standard')
+  const [backtestType, setBacktestType] = useState<'standard' | 'smartmoney' | 'buy-surge' | 'backtrade4'>('standard')
   const [startDate, setStartDate] = useState('2025-11-01')
   const [endDate, setEndDate] = useState('2026-01-03')
   const [initialCapital, setInitialCapital] = useState('10000')
@@ -41,6 +42,27 @@ export default function BacktestForm() {
   const [smartMoneyPositionSizeRatio, setSmartMoneyPositionSizeRatio] = useState('10')
   const [smartMoneyMinPctChg, setSmartMoneyMinPctChg] = useState('25')
   const [showSmartMoneyAdvanced, setShowSmartMoneyAdvanced] = useState(false)
+  // 买量暴涨回测参数
+  const [buySurgeInitialCapital, setBuySurgeInitialCapital] = useState('10000')
+  const [buySurgeLeverage, setBuySurgeLeverage] = useState('4')
+  const [buySurgePositionSizeRatio, setBuySurgePositionSizeRatio] = useState('5')
+  const [buySurgeThreshold, setBuySurgeThreshold] = useState('20.0')
+  const [buySurgeTakeProfitPct, setBuySurgeTakeProfitPct] = useState('20')
+  const [buySurgeAddPositionTriggerPct, setBuySurgeAddPositionTriggerPct] = useState('-18')
+  const [buySurgeStopLossPct, setBuySurgeStopLossPct] = useState('-18')
+  const [buySurgeMaxHoldHours, setBuySurgeMaxHoldHours] = useState('72')
+  const [buySurgeWaitTimeoutHours, setBuySurgeWaitTimeoutHours] = useState('48')
+  const [showBuySurgeAdvanced, setShowBuySurgeAdvanced] = useState(false)
+  // Backtrade4回测参数
+  const [backtrade4InitialCapital, setBacktrade4InitialCapital] = useState('10000')
+  const [backtrade4PositionSizeRatio, setBacktrade4PositionSizeRatio] = useState('10')
+  const [backtrade4MinPctChg, setBacktrade4MinPctChg] = useState('25')
+  const [backtrade4EnableDynamicLeverage, setBacktrade4EnableDynamicLeverage] = useState(true)
+  const [backtrade4EnableLongTrade, setBacktrade4EnableLongTrade] = useState(true)
+  const [backtrade4TradeDirection, setBacktrade4TradeDirection] = useState<'short' | 'long' | 'auto'>('auto')
+  const [backtrade4EnableVolumePositionSizing, setBacktrade4EnableVolumePositionSizing] = useState(true)
+  const [backtrade4EnableRiskControl, setBacktrade4EnableRiskControl] = useState(false)
+  const [showBacktrade4Advanced, setShowBacktrade4Advanced] = useState(false)
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -56,6 +78,105 @@ export default function BacktestForm() {
 
     if (new Date(startDate) > new Date(endDate)) {
       setError('开始日期不能晚于结束日期')
+      return
+    }
+
+    // 买量暴涨回测
+    if (backtestType === 'buy-surge') {
+      // 验证参数
+      const initialCapitalNum = parseFloat(buySurgeInitialCapital)
+      const leverageNum = parseFloat(buySurgeLeverage)
+      const positionSizeRatioNum = parseFloat(buySurgePositionSizeRatio)
+      const thresholdNum = parseFloat(buySurgeThreshold)
+      const takeProfitPctNum = parseFloat(buySurgeTakeProfitPct)
+      const addPositionTriggerPctNum = parseFloat(buySurgeAddPositionTriggerPct)
+      const stopLossPctNum = parseFloat(buySurgeStopLossPct)
+      const maxHoldHoursNum = parseFloat(buySurgeMaxHoldHours)
+      const waitTimeoutHoursNum = parseFloat(buySurgeWaitTimeoutHours)
+
+      if (isNaN(initialCapitalNum) || initialCapitalNum <= 0) {
+        setError('初始资金必须大于0')
+        return
+      }
+      if (isNaN(leverageNum) || leverageNum <= 0) {
+        setError('杠杆倍数必须大于0')
+        return
+      }
+      if (isNaN(positionSizeRatioNum) || positionSizeRatioNum <= 0 || positionSizeRatioNum > 100) {
+        setError('建仓比例必须在0-100之间')
+        return
+      }
+      if (isNaN(thresholdNum) || thresholdNum <= 0) {
+        setError('买量暴涨阈值必须大于0')
+        return
+      }
+      if (isNaN(takeProfitPctNum) || takeProfitPctNum < 0 || takeProfitPctNum > 100) {
+        setError('止盈比例必须在0-100之间')
+        return
+      }
+      if (isNaN(addPositionTriggerPctNum) || addPositionTriggerPctNum > 0) {
+        setError('补仓触发比例必须是负数')
+        return
+      }
+      if (isNaN(stopLossPctNum) || stopLossPctNum > 0) {
+        setError('止损比例必须是负数')
+        return
+      }
+      if (isNaN(maxHoldHoursNum) || maxHoldHoursNum <= 0) {
+        setError('最大持仓小时数必须大于0')
+        return
+      }
+      if (isNaN(waitTimeoutHoursNum) || waitTimeoutHoursNum <= 0) {
+        setError('等待超时时间必须大于0')
+        return
+      }
+
+      setLoading(true)
+      try {
+        const response = await fetch(`${API_URLS.backtest}/api/backtest/buy-surge`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            start_date: startDate,
+            end_date: endDate,
+            initial_capital: initialCapitalNum,
+            leverage: leverageNum,
+            position_size_ratio: positionSizeRatioNum / 100, // 转换为小数
+            buy_surge_threshold: thresholdNum,
+            take_profit_pct: takeProfitPctNum / 100, // 转换为小数
+            add_position_trigger_pct: addPositionTriggerPctNum / 100, // 转换为小数
+            stop_loss_pct: stopLossPctNum / 100, // 转换为小数
+            max_hold_hours: maxHoldHoursNum,
+            wait_timeout_hours: waitTimeoutHoursNum,
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.detail || '回测失败')
+        }
+
+        const data = await response.json()
+        // 转换返回数据格式以匹配BacktestResult接口
+        setResult({
+          initial_capital: data.statistics?.initial_capital || data.initial_capital || 0,
+          final_capital: data.statistics?.final_capital || data.final_capital || 0,
+          total_profit_loss: (data.statistics?.final_capital || 0) - (data.statistics?.initial_capital || 0),
+          total_return_rate: data.statistics?.total_return || data.total_return_rate || 0,
+          total_trades: data.statistics?.total_trades || data.total_trades || 0,
+          win_trades: data.statistics?.winning_trades || data.win_trades || 0,
+          loss_trades: data.statistics?.losing_trades || data.loss_trades || 0,
+          win_rate: data.statistics?.win_rate || data.win_rate || 0,
+          max_drawdown: data.statistics?.max_drawdown,
+          strategy: data.strategy || '买量暴涨策略',
+        })
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '回测失败，请稍后重试')
+      } finally {
+        setLoading(false)
+      }
       return
     }
 
@@ -111,6 +232,74 @@ export default function BacktestForm() {
 
         const data = await response.json()
         setResult(data)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '回测失败，请稍后重试')
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+
+    // Backtrade4回测
+    if (backtestType === 'backtrade4') {
+      // 验证参数
+      const initialCapitalNum = parseFloat(backtrade4InitialCapital)
+      const positionSizeRatioNum = parseFloat(backtrade4PositionSizeRatio)
+      const minPctChgNum = parseFloat(backtrade4MinPctChg)
+
+      if (isNaN(initialCapitalNum) || initialCapitalNum <= 0) {
+        setError('初始资金必须大于0')
+        return
+      }
+      if (isNaN(positionSizeRatioNum) || positionSizeRatioNum <= 0 || positionSizeRatioNum > 100) {
+        setError('基础仓位比例必须在0-100之间')
+        return
+      }
+      if (isNaN(minPctChgNum) || minPctChgNum < 0) {
+        setError('最小涨幅必须大于等于0')
+        return
+      }
+
+      setLoading(true)
+      try {
+        const response = await fetch(`${API_URLS.backtest}/api/backtest/backtrade4`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            start_date: startDate,
+            end_date: endDate,
+            initial_capital: initialCapitalNum,
+            enable_dynamic_leverage: backtrade4EnableDynamicLeverage,
+            enable_long_trade: backtrade4EnableLongTrade,
+            trade_direction: backtrade4TradeDirection,
+            enable_volume_position_sizing: backtrade4EnableVolumePositionSizing,
+            enable_risk_control: backtrade4EnableRiskControl,
+            position_size_ratio: positionSizeRatioNum / 100, // 转换为小数
+            min_pct_chg: minPctChgNum / 100, // 转换为小数
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.detail || '回测失败')
+        }
+
+        const data = await response.json()
+        // 转换数据格式以匹配前端显示
+        setResult({
+          initial_capital: data.statistics?.initial_capital || 0,
+          final_capital: data.statistics?.final_capital || 0,
+          total_profit_loss: data.statistics?.total_profit_loss || 0,
+          total_return_rate: data.statistics?.total_return_rate || 0,
+          total_trades: data.statistics?.total_trades || 0,
+          win_trades: data.statistics?.win_trades || 0,
+          loss_trades: data.statistics?.loss_trades || 0,
+          win_rate: data.statistics?.win_rate || 0,
+          strategy: data.strategy,
+          csv_filename: data.csv_filename
+        })
       } catch (err) {
         setError(err instanceof Error ? err.message : '回测失败，请稍后重试')
       } finally {
@@ -231,6 +420,34 @@ export default function BacktestForm() {
         >
           聪明钱回测
         </button>
+        <button
+          onClick={() => {
+            setBacktestType('buy-surge')
+            setResult(null)
+            setError('')
+          }}
+          className={`px-6 py-3 font-medium transition-colors ${
+            backtestType === 'buy-surge'
+              ? 'text-orange-400 border-b-2 border-orange-400'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          买量暴涨回测
+        </button>
+        <button
+          onClick={() => {
+            setBacktestType('backtrade4')
+            setResult(null)
+            setError('')
+          }}
+          className={`px-6 py-3 font-medium transition-colors ${
+            backtestType === 'backtrade4'
+              ? 'text-green-400 border-b-2 border-green-400'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          Backtrade4回测
+        </button>
       </div>
 
       <div className="bg-gray-700/50 rounded-lg p-6 space-y-6">
@@ -260,6 +477,187 @@ export default function BacktestForm() {
             />
           </div>
         </div>
+
+        {/* 买量暴涨策略参数设置 */}
+        {backtestType === 'buy-surge' && (
+          <div className="bg-orange-900/30 border border-orange-700 rounded-lg p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-orange-300">买量暴涨策略参数</h3>
+              <button
+                onClick={() => setShowBuySurgeAdvanced(!showBuySurgeAdvanced)}
+                className="text-sm text-orange-400 hover:text-orange-300 transition-colors"
+              >
+                {showBuySurgeAdvanced ? '收起 ▲' : '展开 ▼'}
+              </button>
+            </div>
+
+            {/* 基础参数 */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2 text-orange-200">
+                  初始资金 (USDT) <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={buySurgeInitialCapital}
+                  onChange={(e) => setBuySurgeInitialCapital(e.target.value)}
+                  placeholder="例如: 10000"
+                  step="0.01"
+                  min="0"
+                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-orange-200">
+                  杠杆倍数 <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={buySurgeLeverage}
+                  onChange={(e) => setBuySurgeLeverage(e.target.value)}
+                  placeholder="例如: 4"
+                  step="0.1"
+                  min="0"
+                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                />
+                <p className="text-xs text-orange-300 mt-1">默认4倍</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-orange-200">
+                  建仓比例 (%) <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={buySurgePositionSizeRatio}
+                  onChange={(e) => setBuySurgePositionSizeRatio(e.target.value)}
+                  placeholder="例如: 5"
+                  step="0.1"
+                  min="0"
+                  max="100"
+                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                />
+                <p className="text-xs text-orange-300 mt-1">单次建仓占资金比例，默认5%</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-orange-200">
+                  买量暴涨阈值 (倍) <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={buySurgeThreshold}
+                  onChange={(e) => setBuySurgeThreshold(e.target.value)}
+                  placeholder="例如: 20.0"
+                  step="0.1"
+                  min="0"
+                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                />
+                <p className="text-xs text-orange-300 mt-1">当日买量/昨日买量，默认20倍</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-orange-200">
+                  止盈比例 (%) <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={buySurgeTakeProfitPct}
+                  onChange={(e) => setBuySurgeTakeProfitPct(e.target.value)}
+                  placeholder="例如: 20"
+                  step="0.1"
+                  min="0"
+                  max="100"
+                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                />
+                <p className="text-xs text-orange-300 mt-1">基础止盈20%，动态调整可达30%</p>
+              </div>
+            </div>
+
+            {/* 高级参数 */}
+            {showBuySurgeAdvanced && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-orange-700">
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    补仓触发比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeAddPositionTriggerPct}
+                    onChange={(e) => setBuySurgeAddPositionTriggerPct(e.target.value)}
+                    placeholder="例如: -18"
+                    step="0.1"
+                    max="0"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">价格下跌此比例时补仓，默认-18%</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    止损比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeStopLossPct}
+                    onChange={(e) => setBuySurgeStopLossPct(e.target.value)}
+                    placeholder="例如: -18"
+                    step="0.1"
+                    max="0"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">补仓后基于新平均成本，默认-18%</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    最大持仓小时数 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeMaxHoldHours}
+                    onChange={(e) => setBuySurgeMaxHoldHours(e.target.value)}
+                    placeholder="例如: 72"
+                    step="1"
+                    min="1"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">超过此时长强制平仓，默认72小时（3天）</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    等待超时时间 (小时) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeWaitTimeoutHours}
+                    onChange={(e) => setBuySurgeWaitTimeoutHours(e.target.value)}
+                    placeholder="例如: 48"
+                    step="1"
+                    min="1"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">信号后未达到目标跌幅则放弃，默认48小时</p>
+                </div>
+              </div>
+            )}
+
+            {/* 策略说明 */}
+            <div className="mt-4 pt-4 border-t border-orange-700">
+              <h4 className="font-bold mb-2 text-orange-200">买量暴涨策略特点：</h4>
+              <ul className="space-y-1 text-sm text-orange-200 list-disc list-inside">
+                <li>信号识别：扫描所有USDT交易对，寻找当日主动买量 vs 昨日主动买量 ≥ 阈值（默认20倍）</li>
+                <li>信号过滤：检查信号触发前1小时涨幅（5%≤涨幅≤48.5%）</li>
+                <li>等待回调策略：根据买量倍数动态调整等待回调幅度（3%-6%）</li>
+                <li>动态止盈：基于建仓后2小时的价格表现动态调整止盈阈值（20%-30%）</li>
+                <li>补仓机制：价格下跌18%时补仓，重新计算平均成本</li>
+                <li>快进快出：最大持仓72小时（3天）强制平仓</li>
+              </ul>
+            </div>
+          </div>
+        )}
 
         {/* 聪明钱策略参数设置 */}
         {backtestType === 'smartmoney' && (
@@ -407,6 +805,159 @@ export default function BacktestForm() {
                 <li>成交额分级仓位：根据24h成交额动态调整仓位大小</li>
                 <li>入场等待机制：等待开盘价上涨一定幅度后再建仓，避免追高被套</li>
                 <li>实盘风控系统：基于币安期货API获取实时市场情绪数据</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {/* Backtrade4策略参数设置 */}
+        {backtestType === 'backtrade4' && (
+          <div className="bg-green-900/30 border border-green-700 rounded-lg p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-green-300">Backtrade4策略参数</h3>
+              <button
+                onClick={() => setShowBacktrade4Advanced(!showBacktrade4Advanced)}
+                className="text-sm text-green-400 hover:text-green-300 transition-colors"
+              >
+                {showBacktrade4Advanced ? '收起 ▲' : '展开 ▼'}
+              </button>
+            </div>
+
+            {/* 基础参数 */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2 text-green-200">
+                  初始资金 (USDT) <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={backtrade4InitialCapital}
+                  onChange={(e) => setBacktrade4InitialCapital(e.target.value)}
+                  placeholder="例如: 10000"
+                  step="0.01"
+                  min="0"
+                  className="w-full px-4 py-2 bg-green-800/50 border border-green-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-green-200">
+                  基础仓位比例 (%) <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={backtrade4PositionSizeRatio}
+                  onChange={(e) => setBacktrade4PositionSizeRatio(e.target.value)}
+                  placeholder="例如: 10"
+                  step="0.1"
+                  min="0"
+                  max="100"
+                  className="w-full px-4 py-2 bg-green-800/50 border border-green-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-white"
+                />
+                <p className="text-xs text-green-300 mt-1">每次建仓金额占账户余额的百分比</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-green-200">
+                  最小涨幅 (%) <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={backtrade4MinPctChg}
+                  onChange={(e) => setBacktrade4MinPctChg(e.target.value)}
+                  placeholder="例如: 25"
+                  step="0.1"
+                  min="0"
+                  className="w-full px-4 py-2 bg-green-800/50 border border-green-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-white"
+                />
+                <p className="text-xs text-green-300 mt-1">达到此涨幅才建仓</p>
+              </div>
+            </div>
+
+            {/* 高级参数 */}
+            {showBacktrade4Advanced && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-green-700">
+                <div>
+                  <label className="flex items-center text-sm font-medium mb-2 text-green-200">
+                    <input
+                      type="checkbox"
+                      checked={backtrade4EnableDynamicLeverage}
+                      onChange={(e) => setBacktrade4EnableDynamicLeverage(e.target.checked)}
+                      className="mr-2 w-4 h-4"
+                    />
+                    启用动态杠杆策略
+                  </label>
+                  <p className="text-xs text-green-300 ml-6">根据入场涨幅动态调整杠杆、止盈、止损、入场等待涨幅</p>
+                </div>
+
+                <div>
+                  <label className="flex items-center text-sm font-medium mb-2 text-green-200">
+                    <input
+                      type="checkbox"
+                      checked={backtrade4EnableLongTrade}
+                      onChange={(e) => setBacktrade4EnableLongTrade(e.target.checked)}
+                      className="mr-2 w-4 h-4"
+                    />
+                    允许做多
+                  </label>
+                  <p className="text-xs text-green-300 ml-6">支持做多和做空两种交易方向</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-green-200">
+                    交易方向
+                  </label>
+                  <select
+                    value={backtrade4TradeDirection}
+                    onChange={(e) => setBacktrade4TradeDirection(e.target.value as 'short' | 'long' | 'auto')}
+                    className="w-full px-4 py-2 bg-green-800/50 border border-green-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 text-white"
+                  >
+                    <option value="auto">自动（根据信号选择）</option>
+                    <option value="short">只做空</option>
+                    <option value="long">只做多</option>
+                  </select>
+                  <p className="text-xs text-green-300 mt-1">选择交易方向：short=只做空, long=只做多, auto=自动</p>
+                </div>
+
+                <div>
+                  <label className="flex items-center text-sm font-medium mb-2 text-green-200">
+                    <input
+                      type="checkbox"
+                      checked={backtrade4EnableVolumePositionSizing}
+                      onChange={(e) => setBacktrade4EnableVolumePositionSizing(e.target.checked)}
+                      className="mr-2 w-4 h-4"
+                    />
+                    启用成交额分级仓位
+                  </label>
+                  <p className="text-xs text-green-300 ml-6">根据24h成交额动态调整仓位大小（0.5x-1.2x）</p>
+                </div>
+
+                <div>
+                  <label className="flex items-center text-sm font-medium mb-2 text-green-200">
+                    <input
+                      type="checkbox"
+                      checked={backtrade4EnableRiskControl}
+                      onChange={(e) => setBacktrade4EnableRiskControl(e.target.checked)}
+                      className="mr-2 w-4 h-4"
+                    />
+                    启用实盘风控检查
+                  </label>
+                  <p className="text-xs text-green-300 ml-6">基于币安期货API获取实时市场情绪数据（回测时跳过）</p>
+                </div>
+              </div>
+            )}
+
+            {/* 策略说明 */}
+            <div className="mt-4 pt-4 border-t border-green-700">
+              <h4 className="font-bold mb-2 text-green-200">Backtrade4策略特点：</h4>
+              <ul className="space-y-1 text-sm text-green-200 list-disc list-inside">
+                <li>动态杠杆策略：根据入场涨幅动态调整杠杆、止盈、止损、入场等待涨幅</li>
+                <li>双向交易模式：支持做多和做空，根据巨鲸数据分析决定交易方向</li>
+                <li>成交额分级仓位：根据24h成交额动态调整仓位大小（0.5x-1.2x）</li>
+                <li>入场等待机制：等待开盘价上涨一定幅度后再建仓，避免追高被套</li>
+                <li>逐小时检查：使用小时K线数据逐小时检查止盈止损条件</li>
+                <li>实盘风控系统：基于币安期货API获取实时市场情绪数据（回测时跳过）</li>
+                <li>60天均价风控：检查从60天平均价涨幅，避免主力获利不足继续拉升</li>
               </ul>
             </div>
           </div>
@@ -644,7 +1195,7 @@ export default function BacktestForm() {
             {/* 交易统计 */}
             <div className="mt-4 pt-4 border-t border-gray-600">
               <h4 className="font-bold mb-3">交易统计</h4>
-              <div className={`grid grid-cols-2 ${result.long_trades !== undefined ? 'md:grid-cols-6' : 'md:grid-cols-4'} gap-4 text-sm`}>
+              <div className={`grid grid-cols-2 ${result.long_trades !== undefined ? 'md:grid-cols-6' : result.max_drawdown !== undefined ? 'md:grid-cols-5' : 'md:grid-cols-4'} gap-4 text-sm`}>
                 <div>
                   <div className="text-gray-400">交易次数</div>
                   <div className="text-xl font-bold text-white">{result.total_trades}</div>
@@ -661,6 +1212,12 @@ export default function BacktestForm() {
                   <div className="text-gray-400">胜率</div>
                   <div className="text-xl font-bold text-blue-400">{result.win_rate.toFixed(2)}%</div>
                 </div>
+                {result.max_drawdown !== undefined && (
+                  <div>
+                    <div className="text-gray-400">最大回撤</div>
+                    <div className="text-xl font-bold text-yellow-400">{result.max_drawdown.toFixed(2)}%</div>
+                  </div>
+                )}
                 {result.long_trades !== undefined && (
                   <>
                     <div>

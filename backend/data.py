@@ -5,7 +5,7 @@ from typing import Union, Dict, List, Optional
 from datetime import datetime, timedelta
 import logging
 
-from api import in_exchange_trading_symbols, kline_candlestick_data, kline2df
+from binance_api import in_exchange_trading_symbols, kline_candlestick_data, kline2df
 
 # 获取币安交易所所有合约交易对
 IN_EXCHANGE_SYMBOLS = in_exchange_trading_symbols()
@@ -58,6 +58,244 @@ def get_local_kline_data(symbol: str, interval: str = "1d") -> pd.DataFrame:
         import logging
         logging.debug(f"获取本地K线数据失败（表 {table_name} 可能不存在）: {e}")
         return pd.DataFrame()
+
+
+def get_kline_data_for_date(symbol: str, date: str) -> Optional[pd.Series]:
+    """
+    获取指定交易对在指定日期的K线数据
+    
+    Args:
+        symbol: 交易对符号
+        date: 日期字符串 'YYYY-MM-DD'
+    
+    Returns:
+        Series包含该日期的K线数据，或None
+    """
+    try:
+        df = get_local_kline_data(symbol)
+        if df.empty:
+            return None
+        
+        # 将trade_date转换为日期字符串格式进行比较（处理多种日期格式）
+        if df['trade_date'].dtype == 'object':
+            # 字符串格式，提取日期部分
+            df['trade_date_str'] = df['trade_date'].str[:10]
+        else:
+            # datetime格式
+            df['trade_date_str'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+        
+        date_data = df[df['trade_date_str'] == date]
+        if date_data.empty:
+            return None
+        
+        return date_data.iloc[0]
+    except Exception as e:
+        logging.error(f"获取 {symbol} 在 {date} 的K线数据失败: {e}")
+        return None
+
+
+
+def get_24h_quote_volume(symbol: str, entry_datetime: str) -> float:
+    """
+    获取建仓时刻往前24小时的成交额（quote_volume）
+    
+    用于判断主力是否已经出货：
+    - 高涨幅 + 低成交额(<3亿)：主力还没出完货，继续拉盘风险高
+    - 高涨幅 + 高成交额(>=3亿)：FOMO充分，主力可以出货，做空更安全
+    
+    Args:
+        symbol: 交易对符号
+        entry_datetime: 建仓时间（格式：'YYYY-MM-DD HH:MM:SS' 或 'YYYY-MM-DD'）
+    
+    Returns:
+        24小时成交额（USDT），失败返回-1
+    """
+    table_name = f'K1h{symbol}'
+    try:
+        # 解析建仓时间
+        if ' ' in entry_datetime:
+            entry_dt = datetime.strptime(entry_datetime, '%Y-%m-%d %H:%M:%S')
+        else:
+            entry_dt = datetime.strptime(entry_datetime, '%Y-%m-%d')
+        
+        # 计算24小时前的时间
+        start_dt = entry_dt - timedelta(hours=24)
+        
+        # 查询24小时内的成交额总和
+        query = f'''
+            SELECT SUM(quote_volume) as total_volume
+            FROM {table_name}
+            WHERE trade_date >= "{start_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+            AND trade_date < "{entry_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+        '''
+        
+        with engine.connect() as conn:
+            result = conn.execute(text(query))
+            row = result.fetchone()
+            if row and row[0]:
+                return float(row[0])
+            return -1
+    except Exception as e:
+        logging.warning(f"获取 {symbol} 24小时成交额失败: {e}")
+        return -1
+
+
+def get_top_gainer_by_date(date: str) -> Optional[tuple]:
+    """
+    获取指定日期涨幅第一的交易对
+    
+    Args:
+        date: 日期字符串，格式 'YYYY-MM-DD'
+    
+    Returns:
+        Tuple[symbol, pct_chg] 或 None
+    """
+    from typing import Tuple
+    symbols = get_local_symbols()
+    top_gainer = None
+    max_pct_chg = float('-inf')
+    
+    for symbol in symbols:
+        try:
+            df = get_local_kline_data(symbol)
+            if df.empty:
+                continue
+            
+            # 将trade_date转换为字符串格式进行比较（处理多种日期格式）
+            if df['trade_date'].dtype == 'object':
+                # 字符串格式，提取日期部分
+                df['trade_date_str'] = df['trade_date'].str[:10]
+            else:
+                # datetime格式
+                df['trade_date_str'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+            
+            # 查找指定日期的数据
+            date_data = df[df['trade_date_str'] == date]
+            if date_data.empty:
+                continue
+            
+            row = date_data.iloc[0]
+            pct_chg = row['pct_chg']
+            
+            # 如果pct_chg是NaN，尝试使用收盘价和开盘价计算涨幅
+            if pd.isna(pct_chg):
+                # 查找前一天的收盘价
+                date_dt = datetime.strptime(date, '%Y-%m-%d')
+                prev_date = (date_dt - timedelta(days=1)).strftime('%Y-%m-%d')
+                prev_data = df[df['trade_date_str'] == prev_date]
+                
+                if not prev_data.empty and not pd.isna(prev_data.iloc[0]['close']):
+                    prev_close = prev_data.iloc[0]['close']
+                    current_close = row['close']
+                    if not pd.isna(current_close) and prev_close > 0:
+                        # 计算涨幅
+                        pct_chg = (current_close - prev_close) / prev_close * 100
+                    else:
+                        continue
+                else:
+                    continue
+            
+            if pct_chg > max_pct_chg:
+                max_pct_chg = pct_chg
+                top_gainer = symbol
+        except Exception as e:
+            logging.debug(f"获取 {symbol} 在 {date} 的数据失败: {e}")
+            continue
+    
+    if top_gainer:
+        return (top_gainer, max_pct_chg)
+    return None
+
+
+def get_all_top_gainers(start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    获取指定日期范围内所有涨幅第一的交易对（优化版本）
+    
+    Args:
+        start_date: 开始日期 'YYYY-MM-DD'
+        end_date: 结束日期 'YYYY-MM-DD'
+    
+    Returns:
+        DataFrame包含日期、交易对、涨幅
+    """
+    symbols = get_local_symbols()
+    all_data = []
+    
+    # 一次性读取所有交易对的数据
+    logging.info(f"正在读取 {len(symbols)} 个交易对的数据...")
+    for symbol in symbols:
+        try:
+            df = get_local_kline_data(symbol)
+            if df.empty:
+                continue
+            
+            # 标准化trade_date格式
+            if df['trade_date'].dtype == 'object':
+                df['trade_date_str'] = df['trade_date'].str[:10]
+            else:
+                df['trade_date_str'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+            
+            # 筛选日期范围
+            date_mask = (df['trade_date_str'] >= start_date) & (df['trade_date_str'] <= end_date)
+            df_filtered = df[date_mask].copy()
+            
+            if df_filtered.empty:
+                continue
+            
+            # 添加symbol列
+            df_filtered['symbol'] = symbol
+            
+            # 处理NaN的pct_chg
+            for idx, row in df_filtered.iterrows():
+                if pd.isna(row['pct_chg']):
+                    # 尝试计算涨幅
+                    date_str = row['trade_date_str']
+                    date_dt = datetime.strptime(date_str, '%Y-%m-%d')
+                    prev_date = (date_dt - timedelta(days=1)).strftime('%Y-%m-%d')
+                    prev_data = df[df['trade_date_str'] == prev_date]
+                    
+                    if not prev_data.empty and not pd.isna(prev_data.iloc[0]['close']):
+                        prev_close = prev_data.iloc[0]['close']
+                        current_close = row['close']
+                        if not pd.isna(current_close) and prev_close > 0:
+                            df_filtered.at[idx, 'pct_chg'] = (current_close - prev_close) / prev_close * 100
+            
+            # 只保留需要的列
+            df_filtered = df_filtered[['trade_date_str', 'symbol', 'pct_chg']].copy()
+            all_data.append(df_filtered)
+        except Exception as e:
+            logging.debug(f"读取 {symbol} 数据失败: {e}")
+            continue
+    
+    if not all_data:
+        logging.warning("未找到任何数据")
+        return pd.DataFrame(columns=['date', 'symbol', 'pct_chg'])
+    
+    # 合并所有数据
+    logging.info("正在合并数据并计算涨幅第一...")
+    combined_df = pd.concat(all_data, ignore_index=True)
+    
+    # 过滤掉pct_chg为NaN的行
+    combined_df = combined_df[combined_df['pct_chg'].notna()]
+    
+    # 按日期分组，使用nlargest找出每天涨幅最大的交易对
+    top_gainers = (
+        combined_df.groupby('trade_date_str', group_keys=False)
+        .apply(lambda x: x.nlargest(1, 'pct_chg'))
+        .reset_index(drop=True)
+    )
+    
+    # 重命名列
+    top_gainers = top_gainers.rename(columns={'trade_date_str': 'date'})
+    
+    # 按日期排序
+    top_gainers = top_gainers.sort_values('date').reset_index(drop=True)
+    
+    # 记录日志
+    for _, row in top_gainers.iterrows():
+        logging.info(f"{row['date']}: 涨幅第一 {row['symbol']}, 涨幅 {row['pct_chg']:.2f}%")
+    
+    return top_gainers[['date', 'symbol', 'pct_chg']]
 
 
 def delete_all_tables(confirm: bool = False) -> int:

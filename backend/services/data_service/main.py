@@ -11,12 +11,13 @@
 
 import sys
 from pathlib import Path
+import asyncio
 
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -27,11 +28,13 @@ from enum import Enum
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import httpx
 
 from download_klines import (
     download_kline_data,
     download_all_symbols,
     download_missing_symbols,
+    auto_update_all_symbols,
     get_local_symbols,
     get_existing_dates,
     calculate_data_count,
@@ -50,7 +53,7 @@ from data import (
     get_local_symbols
 )
 try:
-    from api import kline_candlestick_data, kline2df
+    from binance_api import kline_candlestick_data, kline2df, in_exchange_trading_symbols
     from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
         KlineCandlestickDataIntervalEnum
     )
@@ -59,11 +62,11 @@ except ImportError:
     BINANCE_API_AVAILABLE = False
     logging.warning("Binance API module not available, real-time K-line feature disabled")
 try:
-    from top3_api import get_top3_gainers
-    TOP3_API_AVAILABLE = True
+    from binance_api import get_top3_gainers
+    BINANCE_API_TOP3_AVAILABLE = True
 except ImportError:
-    TOP3_API_AVAILABLE = False
-    logging.warning("top3_api module not available, 24h top gainers feature disabled")
+    BINANCE_API_TOP3_AVAILABLE = False
+    logging.warning("binance_api module not available, 24h top gainers feature disabled")
 from services.shared.config import DATA_SERVICE_PORT, ALLOWED_ORIGINS
 
 # 配置日志
@@ -121,6 +124,16 @@ class DownloadRequest(BaseModel):
     request_delay: float = Field(default=0.1, description="请求之间的延迟时间（秒）")
     batch_size: Optional[int] = Field(default=None, description="批量下载时的批次大小")
     batch_delay: Optional[float] = Field(default=None, description="批次之间的延迟时间（秒）")
+
+
+class AutoUpdateRequest(BaseModel):
+    """自动补全请求模型"""
+    interval: IntervalEnum = Field(default=IntervalEnum.d1, description="K线间隔")
+    limit: Optional[int] = Field(default=1500, description="每次请求的最大数据条数")
+    auto_split: bool = Field(default=True, description="是否自动分段下载")
+    request_delay: float = Field(default=0.1, description="请求之间的延迟时间（秒）")
+    batch_size: int = Field(default=30, description="批量下载时的批次大小")
+    batch_delay: float = Field(default=3.0, description="批次之间的延迟时间（秒）")
 
 
 class DeleteTablesRequest(BaseModel):
@@ -303,6 +316,38 @@ async def download_klines(request: DownloadRequest, background_tasks: Background
     except Exception as e:
         logging.error(f"下载K线数据失败: {e}")
         raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+
+
+@app.post("/api/auto-update")
+async def auto_update_data(request: AutoUpdateRequest, background_tasks: BackgroundTasks):
+    """
+    自动补全所有交易对的数据：从最后更新日期到现在
+    
+    功能：
+    1. 获取指定interval的所有交易对（本地+交易所）
+    2. 对于每个交易对，获取最后更新日期
+    3. 从最后更新日期的下一个K线开始，补全到当前时间
+    4. 对于没有数据的交易对，从默认开始时间下载
+    """
+    try:
+        background_tasks.add_task(
+            auto_update_all_symbols,
+            interval=request.interval.value,
+            limit=request.limit,
+            auto_split=request.auto_split,
+            request_delay=request.request_delay,
+            batch_size=request.batch_size,
+            batch_delay=request.batch_delay
+        )
+        return {
+            "status": "started",
+            "message": f"已开始自动补全 {request.interval.value} 数据，将从每个交易对的最后更新日期补全到现在",
+            "interval": request.interval.value,
+            "mode": "auto_update"
+        }
+    except Exception as e:
+        logging.error(f"自动补全数据失败: {e}")
+        raise HTTPException(status_code=500, detail=f"自动补全失败: {str(e)}")
 
 
 @app.get("/api/symbols")
@@ -961,10 +1006,10 @@ async def get_top_gainers_24h(top_n: int = 3):
     Returns:
         涨幅排名列表
     """
-    if not TOP3_API_AVAILABLE:
+    if not BINANCE_API_TOP3_AVAILABLE:
         raise HTTPException(
             status_code=503,
-            detail="24小时涨幅数据服务不可用，请检查top3_api模块"
+            detail="24小时涨幅数据服务不可用，请检查binance_api模块"
         )
     
     try:
@@ -974,7 +1019,7 @@ async def get_top_gainers_24h(top_n: int = 3):
         if not callable(get_top3_gainers):
             raise ValueError("get_top3_gainers 不是一个可调用函数")
         
-        df = get_top3_gainers()
+        df = get_top3_gainers(top_n=top_n)
         
         # 检查返回值
         if df is None:
@@ -1029,6 +1074,156 @@ async def get_top_gainers_24h(top_n: int = 3):
         }
     except Exception as e:
         logging.error(f"获取24小时涨幅排名失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+
+
+@app.get("/api/top-gainers-prev-day-binance")
+async def get_top_gainers_prev_day_binance(top_n: int = 3):
+    """
+    获取前一天涨幅前N的交易对（从交易所API数据计算）
+    
+    该接口通过币安API获取所有USDT交易对前一天的日K线数据，
+    计算前一天（24:00-24:00）的涨幅，返回涨幅排名前N的交易对
+    
+    Args:
+        top_n: 返回前N名，默认3
+    
+    Returns:
+        dict: {
+            'date': '前一天的日期',
+            'data_source': '交易所API计算',
+            'top_gainers': [
+                {
+                    'symbol': '交易对',
+                    'pct_chg': 涨幅百分比,
+                    'open': 开盘价,
+                    'close': 收盘价,
+                    'high': 最高价,
+                    'low': 最低价,
+                    'volume': 成交量
+                }
+            ],
+            'total_count': 总交易对数
+        }
+    """
+    if not BINANCE_API_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="币安API模块不可用，无法获取交易所数据"
+        )
+    
+    try:
+        from datetime import datetime, timedelta, timezone
+        
+        logging.info("开始获取前一天涨幅排名（交易所数据）...")
+        
+        # 计算前一天的日期
+        yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+        date_str = yesterday.strftime('%Y-%m-%d')
+        
+        logging.info(f"计算日期: {date_str}")
+        
+        # 获取所有交易对列表
+        symbols = in_exchange_trading_symbols()
+        if not symbols:
+            logging.warning("未找到任何交易对")
+            return {
+                "date": date_str,
+                "data_source": "交易所API计算",
+                "top_gainers": [],
+                "total_count": 0,
+                "message": "未找到交易对数据"
+            }
+        
+        logging.info(f"获取到 {len(symbols)} 个交易对，开始获取API数据...")
+        
+        all_gainers = []
+        
+        async def fetch_gainer(symbol):
+            try:
+                # 转换时间参数（UTC时间）
+                start_dt = datetime.combine(yesterday, datetime.min.time(), tzinfo=timezone.utc)
+                end_dt = start_dt + timedelta(days=1) - timedelta(seconds=1)
+                
+                start_timestamp = int(start_dt.timestamp() * 1000)
+                end_timestamp = int(end_dt.timestamp() * 1000)
+                
+                # 从币安API获取前一天的日K线数据
+                klines = kline_candlestick_data(
+                    symbol=symbol,
+                    interval=KlineCandlestickDataIntervalEnum.INTERVAL_1d.value,
+                    starttime=start_timestamp,
+                    endtime=end_timestamp,
+                    limit=1
+                )
+                
+                if klines and len(klines) > 0:
+                    kline = klines[0]
+                    
+                    # 提取OHLCV数据 (索引: 1=开, 2=高, 3=低, 4=收, 5=量)
+                    open_price = float(kline[1])
+                    high_price = float(kline[2])
+                    low_price = float(kline[3])
+                    close_price = float(kline[4])
+                    volume = float(kline[5])
+                    
+                    # 计算涨幅
+                    if open_price > 0:
+                        pct_chg = (close_price - open_price) / open_price * 100
+                    else:
+                        pct_chg = 0
+                    
+                    gainer = {
+                        'symbol': symbol,
+                        'pct_chg': round(pct_chg, 2),
+                        'open': open_price,
+                        'close': close_price,
+                        'high': high_price,
+                        'low': low_price,
+                        'volume': volume
+                    }
+                    logging.debug(f"{symbol}: 涨幅 {pct_chg:.2f}%")
+                    return gainer
+                
+            except Exception as e:
+                logging.warning(f"获取 {symbol} 数据失败: {e}")
+            
+            return None
+
+        tasks = [fetch_gainer(symbol) for symbol in symbols]
+        results = await asyncio.gather(*tasks)
+        
+        all_gainers = [g for g in results if g is not None]
+        
+        logging.info(f"处理完成: {len(symbols)} 个交易对，成功获取 {len(all_gainers)} 个")
+        
+        if not all_gainers:
+            logging.warning("未能获取任何交易对的数据")
+            return {
+                "date": date_str,
+                "data_source": "交易所API计算",
+                "top_gainers": [],
+                "total_count": 0,
+                "message": "未能获取交易所数据"
+            }
+        
+        # 按涨幅降序排序，取前N名
+        sorted_gainers = sorted(all_gainers, key=lambda x: x['pct_chg'], reverse=True)
+        top_gainers = sorted_gainers[:top_n]
+        
+        logging.info(f"成功获取 {len(all_gainers)} 个交易对的数据，前 {len(top_gainers)} 名涨幅:")
+        for idx, gainer in enumerate(top_gainers, 1):
+            logging.info(f"  {idx}. {gainer['symbol']}: {gainer['pct_chg']:.2f}%")
+        
+        return {
+            "date": date_str,
+            "data_source": "交易所API计算",
+            "top_gainers": top_gainers,
+            "total_count": len(all_gainers)
+        }
+    
+    except Exception as e:
+        logging.error(f"获取前一天涨幅排名失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
 
 
@@ -1351,16 +1546,84 @@ async def upload_database(file: UploadFile = File(...)):
         }
     except Exception as e:
         logging.error(f"上传数据库文件失败: {e}")
-        # 如果保存失败，尝试删除已创建的文件
-        if saved_path.exists():
-            try:
-                saved_path.unlink()
-            except:
-                pass
-        raise HTTPException(
-            status_code=500,
-            detail=f"上传失败: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+@app.get("/api/ip-info")
+async def get_ip_info(request: Request):
+    """
+    获取IP地址信息
+    
+    返回：
+    - client_ip: 客户端IP（从请求头获取，可能是VPN IP）
+    - real_ip: 真实IP（通过外部API获取）
+    """
+    try:
+        # 获取客户端IP（从请求头中获取，可能是VPN IP）
+        client_ip = None
+        
+        # 检查常见的代理头
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        real_ip = request.headers.get("X-Real-IP")
+        cf_connecting_ip = request.headers.get("CF-Connecting-IP")  # Cloudflare
+        
+        if cf_connecting_ip:
+            client_ip = cf_connecting_ip.split(",")[0].strip()
+        elif forwarded_for:
+            client_ip = forwarded_for.split(",")[0].strip()
+        elif real_ip:
+            client_ip = real_ip
+        else:
+            # 如果没有代理头，使用直接连接的IP
+            client_ip = request.client.host if request.client else None
+        
+        # 通过外部API获取真实IP地址
+        real_ip_address = None
+        ip_service_url = None
+        
+        try:
+            # 尝试使用多个IP查询服务
+            ip_services = [
+                "https://api.ipify.org?format=json",
+                "https://api64.ipify.org?format=json",
+                "https://ipapi.co/json/",
+            ]
+            
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                for service_url in ip_services:
+                    try:
+                        response = await client.get(service_url)
+                        if response.status_code == 200:
+                            data = response.json()
+                            if "ip" in data:
+                                real_ip_address = data["ip"]
+                            elif "ip" in data.get("query", ""):
+                                real_ip_address = data.get("query")
+                            else:
+                                real_ip_address = data.get("ip", data.get("origin", None))
+                            
+                            if real_ip_address:
+                                ip_service_url = service_url
+                                break
+                    except Exception as e:
+                        logging.debug(f"IP服务 {service_url} 查询失败: {e}")
+                        continue
+        except Exception as e:
+            logging.warning(f"获取真实IP地址失败: {e}")
+        
+        return {
+            "client_ip": client_ip,
+            "real_ip": real_ip_address,
+            "ip_service": ip_service_url,
+            "headers": {
+                "X-Forwarded-For": forwarded_for,
+                "X-Real-IP": real_ip,
+                "CF-Connecting-IP": cf_connecting_ip,
+            }
+        }
+    except Exception as e:
+        logging.error(f"获取IP信息失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取IP信息失败: {str(e)}")
 
 
 if __name__ == "__main__":

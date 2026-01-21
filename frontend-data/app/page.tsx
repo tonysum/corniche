@@ -8,10 +8,11 @@ import KlineViewer from '@/components/KlineViewer'
 import SymbolListWithChart from '@/components/SymbolListWithChart'
 import DataIntegrityChecker from '@/components/DataIntegrityChecker'
 import DatabaseFileManager from '@/components/DatabaseFileManager'
+import IPInfo from '@/components/IPInfo'
 import { TopGainersProvider } from '@/contexts/TopGainersContext'
 
 export default function DataDashboard() {
-  const [activeTab, setActiveTab] = useState<'download' | 'delete' | 'edit' | 'kline' | 'list-chart' | 'integrity' | 'database'>('download')
+  const [activeTab, setActiveTab] = useState<'download' | 'delete' | 'edit' | 'kline' | 'list-chart' | 'integrity' | 'database' | 'ip-info'>('download')
 
   return (
     <TopGainersProvider>
@@ -98,6 +99,16 @@ export default function DataDashboard() {
             >
               数据库文件
             </button>
+            <button
+              onClick={() => setActiveTab('ip-info')}
+              className={`px-6 py-3 font-medium transition-colors whitespace-nowrap ${
+                activeTab === 'ip-info'
+                  ? 'text-purple-400 border-b-2 border-purple-400'
+                  : 'text-gray-400 hover:text-gray-300'
+              }`}
+            >
+              IP地址信息
+            </button>
           </div>
 
           {/* 内容区域 */}
@@ -114,6 +125,7 @@ export default function DataDashboard() {
             {activeTab === 'list-chart' && <SymbolListWithChart />}
             {activeTab === 'integrity' && <DataIntegrityChecker />}
             {activeTab === 'database' && <DatabaseFileManager />}
+            {activeTab === 'ip-info' && <IPInfo />}
           </div>
         </div>
       </main>

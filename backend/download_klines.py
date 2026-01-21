@@ -3,18 +3,19 @@
 
 功能：
 1. 获取所有USDT交易对
-2. 下载每个交易对的K线数据
-3. 保存到本地SQLite数据库，表名格式：K{interval}{symbol}（例如：K1dBTCUSDT, K1hETHUSDT）
-4. 支持增量更新(避免重复下载)
+2. 🔧 交易对校验：下载前自动校验交易对是否在交易所正常交易，跳过已下架或暂停的交易对
+3. 下载每个交易对的K线数据
+4. 保存到本地SQLite数据库，表名格式：K{interval}{symbol}（例如：K1dBTCUSDT, K1hETHUSDT）
+5. 支持增量更新(避免重复下载)
    - 日线及以上：按日期去重，不更新最后一天
    - 小时线及以下：按时间点去重，不更新最后一条
-5. 智能跳过：下载前检查本地数据最后时间，如果 >= end_time则跳过该交易对（除非使用--update）
-6. 支持指定开始和结束时间，确保不同时间间隔的数据时间范围一致
-7. 默认不下载当天数据（因为当天数据不完整）
-8. 自动分段下载：当数据条数超过1500条时，自动分段下载，每段最多1500条
-9. 请求频率控制：每次API请求之间自动延迟，避免触发API频率限制
-   - 每次请求延迟：默认0.1秒（可通过--request-delay调整）
-   - 批次暂停：每处理指定数量的交易对后暂停（默认30个后暂停3秒）
+6. 智能跳过：下载前检查本地数据最后时间，如果 >= end_time则跳过该交易对（除非使用--update）
+7. 支持指定开始和结束时间，确保不同时间间隔的数据时间范围一致
+8. 默认不下载当天数据（因为当天数据不完整）
+9. 自动分段下载：当数据条数超过1500条时，自动分段下载，每段最多1500条
+10. 请求频率控制：每次API请求之间自动延迟，避免触发API频率限制
+    - 每次请求延迟：默认0.1秒（可通过--request-delay调整）
+    - 批次暂停：每处理指定数量的交易对后暂停（默认30个后暂停3秒）
 
 使用方法举例：
 
@@ -71,6 +72,10 @@
 
 注意事项：
 - 表名格式：K{interval}{symbol}，例如日线数据存储在 K1dBTCUSDT 表中
+- 🔧 交易对校验：下载前会自动校验交易对是否在交易所正常交易（状态为TRADING）
+  * 如果交易对已下架或暂停交易，会自动跳过并记录警告日志
+  * 交易对列表会缓存1小时，避免重复查询交易所
+  * 如果无法获取交易所交易对列表（网络问题等），会记录警告但允许继续下载
 - 默认不下载当天的数据（因为当天数据不完整）
 - 增量更新规则：
   * 日线及以上（1d, 3d, 1w, 1M）：按日期去重，不更新最后一天
@@ -86,27 +91,159 @@ import os
 import sys
 import logging
 import time
+import shutil
 import pandas as pd      # pyright: ignore[reportMissingImports]
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from sqlalchemy import text  # pyright: ignore[reportMissingImports]
 
-from api import (
+from binance_api import (
     in_exchange_trading_symbols,
     kline_candlestick_data,
     kline2df
 )
-
-from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (  # pyright: ignore[reportMissingImports]
+from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     KlineCandlestickDataIntervalEnum
 )
 from db import engine, create_table
+
+# 🔧 缓存交易所正常交易的交易对列表（避免重复查询）
+_valid_trading_symbols_cache: Optional[List[str]] = None
+_cache_timestamp: Optional[datetime] = None
+CACHE_TTL_SECONDS = 3600
+DEFAULT_REQUEST_DELAY = 0.3
+DEFAULT_BATCH_SIZE = 30
+DEFAULT_BATCH_DELAY = 3.0
+SQLITE_BATCH_SIZE = 50
+API_DATA_LIMIT = 1500
+DISK_SPACE_REQUIRED_GB = 1.0
+
+
+def get_valid_trading_symbols(force_refresh: bool = False) -> List[str]:
+    """
+    获取交易所正常交易的交易对列表（带缓存）
+    
+    Args:
+        force_refresh: 是否强制刷新缓存，默认False
+    
+    Returns:
+        正常交易的交易对列表
+    """
+    global _valid_trading_symbols_cache, _cache_timestamp
+    
+    now = datetime.now()
+    
+    # 检查缓存是否有效
+    if (
+        not force_refresh
+        and _valid_trading_symbols_cache is not None
+        and _cache_timestamp is not None
+        and (now - _cache_timestamp).total_seconds() < CACHE_TTL_SECONDS
+    ):
+        return _valid_trading_symbols_cache
+    
+    # 从交易所获取交易对列表
+    logging.info("正在从交易所获取正常交易的交易对列表...")
+    try:
+        valid_symbols = in_exchange_trading_symbols(status="TRADING")
+        if valid_symbols:
+            _valid_trading_symbols_cache = valid_symbols
+            _cache_timestamp = now
+            logging.info(f"获取到 {len(valid_symbols)} 个正常交易的交易对")
+            return valid_symbols
+        else:
+            logging.warning("无法从交易所获取交易对列表，返回空列表")
+            return []
+    except Exception as e:
+        logging.error(f"获取交易所交易对列表失败: {e}")
+        # 如果获取失败，返回缓存（如果有）
+        if _valid_trading_symbols_cache is not None:
+            logging.warning("使用缓存的交易对列表")
+            return _valid_trading_symbols_cache
+        return []
+
+
+def validate_symbol(symbol: str, skip_validation: bool = False) -> bool:
+    """
+    校验交易对是否在交易所正常交易
+    
+    Args:
+        symbol: 交易对符号
+        skip_validation: 是否跳过校验（用于测试或特殊情况），默认False
+    
+    Returns:
+        bool: 如果交易对正常交易返回True，否则返回False
+    """
+    if skip_validation:
+        return True
+    
+    valid_symbols = get_valid_trading_symbols()
+    
+    if not valid_symbols:
+        # 如果无法获取交易对列表，记录警告但允许继续（避免网络问题导致无法下载）
+        logging.warning(f"⚠️ 无法获取交易所交易对列表，跳过 {symbol} 的校验（允许继续下载）")
+        return True
+    
+    if symbol not in valid_symbols:
+        logging.warning(
+            f"⚠️ 交易对 {symbol} 不在交易所正常交易列表中，跳过下载。"
+            f"（可能已下架或暂停交易）"
+        )
+        return False
+    
+        return True
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+
+def check_disk_space(db_path: str, required_gb: float = 1.0) -> bool:
+    """
+    检查磁盘可用空间是否足够
+    
+    Args:
+        db_path: 数据库文件路径
+        required_gb: 需要的最小可用空间（GB），默认 1GB
+    
+    Returns:
+        bool: 如果可用空间足够返回 True，否则返回 False
+    """
+    try:
+        # 获取数据库文件所在目录
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        if not db_dir:
+            db_dir = os.getcwd()
+        
+        # 获取磁盘使用情况
+        stat = shutil.disk_usage(db_dir)
+        free_gb = stat.free / (1024 ** 3)  # 转换为 GB
+        total_gb = stat.total / (1024 ** 3)
+        used_percent = (stat.used / stat.total) * 100
+        
+        logging.info(f"磁盘空间检查: 总容量 {total_gb:.2f}GB, 已用 {used_percent:.1f}%, 可用 {free_gb:.2f}GB")
+        
+        if free_gb < required_gb:
+            logging.error(
+                f"磁盘空间不足！需要至少 {required_gb}GB 可用空间，"
+                f"但当前只有 {free_gb:.2f}GB 可用。"
+                f"请清理磁盘空间后再试。"
+            )
+            return False
+        
+        # 如果磁盘使用率超过 95%，发出警告
+        if used_percent > 95:
+            logging.warning(
+                f"磁盘使用率过高 ({used_percent:.1f}%)，"
+                f"建议清理磁盘空间以避免问题。"
+            )
+        
+        return True
+    except Exception as e:
+        logging.warning(f"无法检查磁盘空间: {e}，继续执行...")
+        return True  # 如果检查失败，允许继续执行
 
 
 def get_local_symbols(interval: str = "1d") -> List[str]:
@@ -153,6 +290,25 @@ def calculate_interval_seconds(interval: str) -> int:
     return interval_map.get(interval, 86400)
 
 
+def ensure_utc_timezone(*args: datetime) -> tuple:
+    """
+    确保datetime对象具有UTC时区信息
+
+    Args:
+        *args: 需要处理的datetime对象
+
+    Returns:
+        tuple: 处理后的datetime对象列表（都带有UTC时区）
+    """
+    result = []
+    for dt in args:
+        if dt.tzinfo is None:
+            result.append(dt.replace(tzinfo=timezone.utc))
+        else:
+            result.append(dt)
+    return tuple(result) if len(result) > 1 else result[0]
+
+
 def calculate_data_count(start_time: datetime, end_time: datetime, interval: str) -> int:
     """
     计算指定时间范围内的数据条数
@@ -167,26 +323,16 @@ def calculate_data_count(start_time: datetime, end_time: datetime, interval: str
     """
     if not start_time or not end_time:
         return 0
-    
-    # 确保两个datetime对象都有相同的时区信息
-    if start_time.tzinfo is None and end_time.tzinfo is not None:
-        # start_time没有时区，end_time有时区，将start_time转换为UTC
-        start_time = start_time.replace(tzinfo=timezone.utc)
-    elif start_time.tzinfo is not None and end_time.tzinfo is None:
-        # start_time有时区，end_time没有时区，将end_time转换为UTC
-        end_time = end_time.replace(tzinfo=timezone.utc)
-    elif start_time.tzinfo is None and end_time.tzinfo is None:
-        # 两个都没有时区，假设是UTC
-        start_time = start_time.replace(tzinfo=timezone.utc)
-        end_time = end_time.replace(tzinfo=timezone.utc)
-    
+
+    start_time, end_time = ensure_utc_timezone(start_time, end_time)
+
     interval_seconds = calculate_interval_seconds(interval)
     total_seconds = int((end_time - start_time).total_seconds())
     count = total_seconds // interval_seconds + 1
     return count
 
 
-def split_time_range(start_time: datetime, end_time: datetime, interval: str, max_count: int = 1500) -> List[tuple]:
+def split_time_range(start_time: datetime, end_time: datetime, interval: str, max_count: int = API_DATA_LIMIT) -> List[tuple]:
     """
     将时间范围分割成多个段，每段不超过max_count条数据
     
@@ -201,19 +347,9 @@ def split_time_range(start_time: datetime, end_time: datetime, interval: str, ma
     """
     if not start_time or not end_time:
         return []
-    
-    # 确保两个datetime对象都有相同的时区信息
-    if start_time.tzinfo is None and end_time.tzinfo is not None:
-        # start_time没有时区，end_time有时区，将start_time转换为UTC
-        start_time = start_time.replace(tzinfo=timezone.utc)
-    elif start_time.tzinfo is not None and end_time.tzinfo is None:
-        # start_time有时区，end_time没有时区，将end_time转换为UTC
-        end_time = end_time.replace(tzinfo=timezone.utc)
-    elif start_time.tzinfo is None and end_time.tzinfo is None:
-        # 两个都没有时区，假设是UTC
-        start_time = start_time.replace(tzinfo=timezone.utc)
-        end_time = end_time.replace(tzinfo=timezone.utc)
-    
+
+    start_time, end_time = ensure_utc_timezone(start_time, end_time)
+
     interval_seconds = calculate_interval_seconds(interval)
     max_seconds = (max_count - 1) * interval_seconds  # 减1是因为包含起始和结束时间
     
@@ -259,31 +395,44 @@ def _insert_with_skip_duplicates(df: pd.DataFrame, table_name: str, engine) -> i
         int: 成功插入的行数
     """
     saved_count = 0
+    skipped_count = 0
+    total_rows = len(df)
     
-    for _, row in df.iterrows():
+    # 🔧 修复：表名用双引号括起来，避免包含特殊字符时SQL语法错误
+    quoted_table_name = f'"{table_name}"'
+    
+    for idx, (_, row) in enumerate(df.iterrows(), 1):
         try:
             # 将row转换为字典
             row_dict = row.to_dict()
             
             # 构建INSERT语句，使用命名参数（:param）
-            columns = ', '.join(df.columns)
+            # 🔧 修复：列名也用双引号括起来，避免特殊字符问题
+            columns = ', '.join([f'"{col}"' for col in df.columns])
             placeholders = ', '.join([f':{col}' for col in df.columns])
             
-            stmt = f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})"
+            stmt = f"INSERT INTO {quoted_table_name} ({columns}) VALUES ({placeholders})"
             with engine.connect() as conn:
                 # SQLAlchemy的execute方法使用字典作为参数
                 conn.execute(text(stmt), row_dict)
                 conn.commit()
             saved_count += 1
+            
+            # 每处理100条输出一次进度
+            if idx % 100 == 0:
+                logging.info(f"逐条插入进度: {idx}/{total_rows}, 已保存: {saved_count}, 跳过: {skipped_count}")
         except Exception as e:
             # 如果是UNIQUE constraint错误，跳过这条数据
             if 'UNIQUE constraint' in str(e) or 'IntegrityError' in str(type(e).__name__):
+                skipped_count += 1
                 continue
             else:
                 trade_date = row_dict.get('trade_date', 'unknown') if 'row_dict' in locals() else 'unknown'
                 logging.error(f"插入数据失败: {e}, trade_date: {trade_date}")
+                logging.error(f"SQL语句: {stmt}")
                 raise
     
+    logging.info(f"逐条插入完成: 总计 {total_rows} 条，成功保存 {saved_count} 条，跳过 {skipped_count} 条重复数据")
     return saved_count
 
 
@@ -358,15 +507,63 @@ def compare_trade_dates(last_date: str, end_time: datetime, interval: str) -> bo
         return False
 
 
+def _get_default_end_time(interval: str, reference_time: Optional[datetime] = None) -> datetime:
+    """
+    获取指定K线间隔的默认结束时间
+
+    Args:
+        interval: K线间隔
+        reference_time: 参考时间，默认为当前时间
+
+    Returns:
+        datetime: 默认结束时间
+    """
+    if reference_time is None:
+        reference_time = datetime.now()
+
+    if interval in ['1d', '3d', '1w', '1M']:
+        today = reference_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        return today - timedelta(seconds=1)
+    else:
+        interval_seconds = calculate_interval_seconds(interval)
+        now_utc = reference_time.replace(tzinfo=timezone.utc) if reference_time.tzinfo is None else reference_time.astimezone(timezone.utc)
+        current_timestamp = int(now_utc.timestamp())
+        kline_index = current_timestamp // interval_seconds
+        current_kline_start_timestamp = kline_index * interval_seconds
+        latest_complete_kline_start_timestamp = current_kline_start_timestamp - interval_seconds
+        return datetime.fromtimestamp(latest_complete_kline_start_timestamp, tz=timezone.utc)
+
+
+def _get_latest_complete_kline_time(interval: str) -> datetime:
+    """
+    获取当前时间之前最新完整K线的开始时间
+
+    Args:
+        interval: K线间隔
+
+    Returns:
+        datetime: 最新完整K线的开始时间（UTC时区）
+    """
+    interval_seconds = calculate_interval_seconds(interval)
+    now = datetime.now()
+    now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+    current_timestamp = int(now_utc.timestamp())
+    kline_index = current_timestamp // interval_seconds
+    current_kline_start_timestamp = kline_index * interval_seconds
+    latest_complete_kline_start_timestamp = current_kline_start_timestamp - interval_seconds
+    return datetime.fromtimestamp(latest_complete_kline_start_timestamp, tz=timezone.utc)
+
+
 def download_kline_data(
     symbol: str,
     interval: str = "1d",
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    limit: Optional[int] = 1500,
+    limit: Optional[int] = API_DATA_LIMIT,
     update_existing: bool = False,
     auto_split: bool = True,
-    request_delay: float = 0.1
+    request_delay: float = DEFAULT_REQUEST_DELAY,
+    skip_symbol_validation: bool = False
 ) -> bool:
     """
     下载指定交易对的K线数据并保存到数据库
@@ -382,35 +579,36 @@ def download_kline_data(
         limit: 每次请求的最大条数, 默认1500。如果为None且提供了start_time和end_time，会自动计算
         update_existing: 是否更新已存在的数据, 默认False
         auto_split: 当数据条数超过limit时是否自动分段下载, 默认True
-        request_delay: 每次API请求之间的延迟时间（秒），避免频率限制, 默认0.1秒
+        request_delay: 每次API请求之间的延迟时间（秒），避免频率限制, 默认0.3秒
+        skip_symbol_validation: 是否跳过交易对校验（用于测试或特殊情况），默认False
     
     Returns:
         bool: 是否成功下载
     """
+    # 🔧 校验交易对是否在交易所正常交易
+    if not validate_symbol(symbol, skip_validation=skip_symbol_validation):
+        return False
+    
     table_name = f'K{interval}{symbol}'
+    
+    # 检查磁盘空间（在开始下载前）
+    import os
+    from pathlib import Path
+    db_path_env = os.getenv("DB_PATH")
+    if not db_path_env:
+        backend_dir = Path(__file__).parent
+        project_root = backend_dir.parent
+        db_path_env = str(project_root / "data" / "crypto_data.db")
+    
+    if not check_disk_space(db_path_env, required_gb=DISK_SPACE_REQUIRED_GB):
+        logging.error(f"磁盘空间不足，跳过下载 {symbol} 的 {interval} 数据")
+        return False
     
     try:
         # 如果未启用update_existing，先检查本地最后一条数据的时间
-        # 这个检查必须在任何API调用之前进行，避免不必要的网络请求
         if not update_existing:
-            # 确定要比较的结束时间：如果提供了end_time就用它，否则根据K线间隔计算
-            check_end_time = end_time
-            if check_end_time is None:
-                now = datetime.now()
-                if interval in ['1d', '3d', '1w', '1M']:
-                    # 日线及以上, 使用昨天的结束时间
-                    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                    check_end_time = today - timedelta(seconds=1)  # 昨天的23:59:59
-                else:
-                    # 小时线及以下, 使用当前时间之前的最新完整K线时间
-                    interval_seconds = calculate_interval_seconds(interval)
-                    now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
-                    current_timestamp = int(now_utc.timestamp())
-                    kline_index = current_timestamp // interval_seconds
-                    current_kline_start_timestamp = kline_index * interval_seconds
-                    latest_complete_kline_start_timestamp = current_kline_start_timestamp - interval_seconds
-                    check_end_time = datetime.fromtimestamp(latest_complete_kline_start_timestamp, tz=timezone.utc)
-            
+            check_end_time = end_time if end_time is not None else _get_default_end_time(interval)
+
             last_trade_date = get_last_trade_date(symbol, interval)
             if last_trade_date:
                 if compare_trade_dates(last_trade_date, check_end_time, interval):
@@ -426,29 +624,14 @@ def download_kline_data(
         
         # 转换时间间隔
         interval_enum = KlineCandlestickDataIntervalEnum[f"INTERVAL_{interval}"].value
-        
+
         # 转换时间格式(如果需要)
-        # 如果end_time为None, 根据K线间隔设置默认结束时间
         if end_time is None:
-            now = datetime.now()
-            if interval in ['1d', '3d', '1w', '1M']:
-                # 日线及以上, 默认设置为昨天的结束时间(不包含今天)
-                today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                end_time = today - timedelta(seconds=1)  # 昨天的23:59:59
-            else:
-                # 小时线及以下, 设置为当前时间之前的最新完整K线时间
-                interval_seconds = calculate_interval_seconds(interval)
-                now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
-                current_timestamp = int(now_utc.timestamp())
-                kline_index = current_timestamp // interval_seconds
-                current_kline_start_timestamp = kline_index * interval_seconds
-                # 最新完整K线的开始时间 = 当前K线开始时间 - 一个K线周期
-                latest_complete_kline_start_timestamp = current_kline_start_timestamp - interval_seconds
-                end_time = datetime.fromtimestamp(latest_complete_kline_start_timestamp, tz=timezone.utc)
-                logging.info(f"{symbol} 默认结束时间设置为最新完整K线时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            end_time = _get_default_end_time(interval)
+            logging.info(f"{symbol} 默认结束时间设置为最新完整K线时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         
         # 如果提供了start_time和end_time，检查是否需要分段下载
-        max_limit = limit if limit is not None else 1500
+        max_limit = limit if limit is not None else API_DATA_LIMIT
         
         if start_time and end_time and auto_split:
             # 计算预计数据条数
@@ -491,7 +674,26 @@ def download_kline_data(
                         else:
                             logging.warning(f"{symbol} 第 {idx} 段没有获取到K线数据")
                     except Exception as e:
+                        error_msg = str(e)
                         logging.error(f"{symbol} 第 {idx} 段下载失败: {e}")
+                        
+                        # 检查是否是API频率限制错误
+                        if 'Way too many requests' in error_msg or 'banned until' in error_msg:
+                            # 尝试从错误信息中提取封禁时间
+                            import re
+                            banned_match = re.search(r'banned until (\d+)', error_msg)
+                            if banned_match:
+                                banned_until = int(banned_match.group(1))
+                                current_time = int(time.time() * 1000)  # 转换为毫秒
+                                wait_time = max(0, (banned_until - current_time) / 1000)  # 转换为秒
+                                if wait_time > 0:
+                                    logging.warning(f"{symbol} 检测到API频率限制，等待 {wait_time:.1f} 秒...")
+                                    time.sleep(min(wait_time + 5, 300))  # 最多等待5分钟
+                            else:
+                                # 如果没有提取到封禁时间，等待60秒
+                                logging.warning(f"{symbol} 检测到API频率限制，等待 60 秒...")
+                                time.sleep(60)
+                        
                         continue
                 
                 if not all_dfs:
@@ -515,9 +717,11 @@ def download_kline_data(
                 logging.info(f"{symbol} 分段下载完成，合并后共 {len(df)} 条数据（去重前: {sum(len(d) for d in all_dfs)} 条）")
             else:
                 # 不需要分段，直接下载
+                start_time, end_time = ensure_utc_timezone(start_time, end_time)
+
                 start_timestamp = int(start_time.timestamp() * 1000)
                 end_timestamp = int(end_time.timestamp() * 1000)
-                
+
                 # 请求前暂停
                 if request_delay > 0:
                     time.sleep(request_delay)
@@ -541,10 +745,12 @@ def download_kline_data(
             start_timestamp = None
             end_timestamp = None
             if start_time:
+                start_time = ensure_utc_timezone(start_time)
                 start_timestamp = int(start_time.timestamp() * 1000)
             if end_time:
+                end_time = ensure_utc_timezone(end_time)
                 end_timestamp = int(end_time.timestamp() * 1000)
-            
+
             # 请求前暂停
             if request_delay > 0:
                 time.sleep(request_delay)
@@ -588,47 +794,25 @@ def download_kline_data(
         now = datetime.now()
         today_str = now.strftime('%Y-%m-%d')
         before_filter = len(df)
-        
+
         if interval in ['1d', '3d', '1w', '1M']:
-            # 日线及以上, 过滤掉今天的日期（因为今天的数据不完整）
             df = df[df['trade_date'] != today_str]
         else:
-            # 小时线及以下, 计算当前时间之前的最新完整K线时间
-            # 例如：4小时K线，如果现在是10:00，那么08:00的K线应该已经完整了
-            interval_seconds = calculate_interval_seconds(interval)
-            
-            # 计算当前时间所在K线的开始时间
-            # 将当前时间向下取整到最近的K线开始时间
-            # 使用UTC时间，因为币安API返回的时间戳是UTC
-            now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
-            current_timestamp = int(now_utc.timestamp())
-            # 计算从1970-01-01 00:00:00 UTC到当前时间经过了多少个K线周期
-            kline_index = current_timestamp // interval_seconds
-            # 计算当前K线的开始时间戳
-            current_kline_start_timestamp = kline_index * interval_seconds
-            # 最新完整K线的结束时间 = 当前K线的开始时间（因为当前K线还未结束）
-            # 所以最新完整K线的开始时间 = 当前K线开始时间 - 一个K线周期
-            latest_complete_kline_start_timestamp = current_kline_start_timestamp - interval_seconds
-            latest_complete_time = datetime.fromtimestamp(latest_complete_kline_start_timestamp, tz=timezone.utc)
-            
-            # 过滤掉晚于最新完整K线时间的数据
+            latest_complete_time = _get_latest_complete_kline_time(interval)
+
             def is_complete_kline(trade_date_str: str) -> bool:
                 try:
-                    # 小时线及以下使用完整时间格式
-                    # trade_date_str是UTC时间字符串（从币安API获取）
                     trade_date_obj = datetime.strptime(trade_date_str, '%Y-%m-%d %H:%M:%S')
-                    # 将trade_date_obj转换为UTC时间对象进行比较
                     trade_date_utc = trade_date_obj.replace(tzinfo=timezone.utc)
-                    # 如果K线时间 <= 最新完整K线时间，则认为是完整的
                     return trade_date_utc <= latest_complete_time
-                except:
-                    return True  # 如果解析失败，保留数据（让其他逻辑处理）
-            
+                except (ValueError, TypeError):
+                    return True
+
             df = df[df['trade_date'].apply(is_complete_kline)]
-            
+
             if before_filter > len(df):
                 logging.info(f"{symbol} 过滤掉 {before_filter - len(df)} 条不完整的K线数据（最新完整K线时间: {latest_complete_time.strftime('%Y-%m-%d %H:%M:%S')}）")
-        
+
         after_filter = len(df)
         if after_filter < before_filter:
             logging.info(f"{symbol} 共过滤掉 {before_filter - after_filter} 条不完整数据")
@@ -665,17 +849,11 @@ def download_kline_data(
                     logging.info(f"{symbol} 最终检查后没有新数据需要保存")
                     return True
         
-        # 保存到数据库
-        # SQLite对单次插入的参数数量有限制（默认999）
-        # 每条K线数据有15个字段，所以每批最多插入 999/15 ≈ 66 条
-        # 为了安全，使用50条作为批次大小
-        BATCH_SIZE = 50  # 每批插入50条，避免超过SQLite参数限制（15字段 * 50条 = 750参数 < 999）
+        BATCH_SIZE = SQLITE_BATCH_SIZE
         total_rows = len(df)
-        
         saved_count = 0
-        
+
         if total_rows <= BATCH_SIZE:
-            # 数据量小，直接插入
             try:
                 df.to_sql(
                     name=table_name,
@@ -686,14 +864,9 @@ def download_kline_data(
                 )
                 saved_count = len(df)
             except Exception as e:
-                # 如果出现UNIQUE constraint错误，逐条插入跳过重复的
-                if 'UNIQUE constraint' in str(e) or 'IntegrityError' in str(type(e).__name__):
-                    logging.warning(f"{symbol} 批量插入遇到重复数据，改为逐条插入跳过重复项")
-                    saved_count = _insert_with_skip_duplicates(df, table_name, engine)
-                else:
-                    raise
+                logging.error(f"{symbol} 批量插入失败: {e}")
+                raise
         else:
-            # 数据量大，分批插入
             for i in range(0, total_rows, BATCH_SIZE):
                 batch_df = df.iloc[i:i+BATCH_SIZE]
                 try:
@@ -706,15 +879,11 @@ def download_kline_data(
                     )
                     saved_count += len(batch_df)
                 except Exception as e:
-                    # 如果出现UNIQUE constraint错误，逐条插入跳过重复的
-                    if 'UNIQUE constraint' in str(e) or 'IntegrityError' in str(type(e).__name__):
-                        logging.warning(f"{symbol} 第 {i//BATCH_SIZE + 1} 批插入遇到重复数据，改为逐条插入跳过重复项")
-                        saved_count += _insert_with_skip_duplicates(batch_df, table_name, engine)
-                    else:
-                        raise
-                
+                    logging.error(f"{symbol} 第 {i//BATCH_SIZE + 1} 批插入失败: {e}")
+                    raise
+
                 if (i + BATCH_SIZE) % (BATCH_SIZE * 10) == 0 or (i + BATCH_SIZE) >= total_rows:
-                    # 每插入10批（500条）或最后一批时输出进度
+                    logging.info(f"{symbol} 已保存 {saved_count}/{total_rows} 条数据")
                     logging.info(f"{symbol} 已保存 {saved_count}/{total_rows} 条数据")
         
         if saved_count < total_rows:
@@ -733,13 +902,13 @@ def download_all_symbols(
     days_back: Optional[int] = None,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    limit: Optional[int] = 1500,
+    limit: Optional[int] = API_DATA_LIMIT,
     update_existing: bool = False,
     symbols: Optional[List[str]] = None,
     auto_split: bool = True,
-    request_delay: float = 0.1,
-    batch_size: int = 30,
-    batch_delay: float = 3.0
+    request_delay: float = DEFAULT_REQUEST_DELAY,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_delay: float = DEFAULT_BATCH_DELAY
 ):
     """
     下载所有交易对的K线数据
@@ -760,8 +929,34 @@ def download_all_symbols(
         if not all_symbols:
             logging.error("无法获取交易对列表")
             return
+        # 从交易所获取的交易对列表已经是正常交易的，不需要额外校验
+        logging.info(f"从交易所获取到 {len(all_symbols)} 个正常交易的交易对")
     else:
+        # 🔧 如果用户提供了自定义交易对列表，需要校验每个交易对
         all_symbols = symbols
+        logging.info(f"用户指定了 {len(all_symbols)} 个交易对，将进行校验...")
+        
+        # 过滤掉不在交易所正常交易的交易对
+        valid_symbols = []
+        invalid_symbols = []
+        valid_trading_list = get_valid_trading_symbols()
+        
+        for symbol in all_symbols:
+            if valid_trading_list and symbol not in valid_trading_list:
+                invalid_symbols.append(symbol)
+                logging.warning(f"⚠️ 交易对 {symbol} 不在交易所正常交易列表中，将跳过")
+            else:
+                valid_symbols.append(symbol)
+        
+        if invalid_symbols:
+            logging.warning(f"⚠️ 共 {len(invalid_symbols)} 个交易对不在交易所正常交易列表中，已跳过")
+            logging.info(f"✅ 共 {len(valid_symbols)} 个有效交易对将进行下载")
+        
+        all_symbols = valid_symbols
+        
+        if not all_symbols:
+            logging.error("没有有效的交易对可以下载")
+            return
     
     logging.info(f"共找到 {len(all_symbols)} 个交易对")
     
@@ -823,11 +1018,11 @@ def download_missing_symbols(
     days_back: Optional[int] = None,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    limit: Optional[int] = 1500,
+    limit: Optional[int] = API_DATA_LIMIT,
     auto_split: bool = True,
-    request_delay: float = 0.1,
-    batch_size: int = 30,
-    batch_delay: float = 3.0
+    request_delay: float = DEFAULT_REQUEST_DELAY,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_delay: float = DEFAULT_BATCH_DELAY
 ):
     """只下载本地数据库中缺失的交易对数据"""
     logging.info("正在检查缺失的交易对...")
@@ -864,6 +1059,218 @@ def download_missing_symbols(
         batch_size=batch_size,
         batch_delay=batch_delay
     )
+
+
+def auto_update_all_symbols(
+    interval: str = "1d",
+    limit: Optional[int] = API_DATA_LIMIT,
+    auto_split: bool = True,
+    request_delay: float = DEFAULT_REQUEST_DELAY,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_delay: float = DEFAULT_BATCH_DELAY
+):
+    """
+    自动补全所有交易对的数据：从最后更新日期到现在
+    
+    功能：
+    1. 获取指定interval的所有交易对
+    2. 对于每个交易对，获取最后更新日期
+    3. 从最后更新日期的下一天/下一个K线开始，补全到当前时间
+    4. 对于没有数据的交易对，从默认开始时间下载
+    
+    Args:
+        interval: K线间隔
+        limit: 每次请求的最大条数
+        auto_split: 是否自动分段下载
+        request_delay: 每次API请求之间的延迟时间（秒）
+        batch_size: 每处理多少个交易对后暂停
+        batch_delay: 每批处理后的暂停时间（秒）
+    """
+    logging.info("=" * 80)
+    logging.info(f"开始自动补全 {interval} 数据")
+    logging.info("=" * 80)
+    
+    # 统计信息（提前定义，避免未定义错误）
+    stats = {
+        'total': 0,
+        'updated': 0,
+        'new': 0,
+        'skipped': 0,
+        'failed': 0,
+        'no_data_needed': 0
+    }
+    
+    # 只获取交易所的交易对列表（忽略本地已下架的交易对）
+    exchange_symbols = in_exchange_trading_symbols()
+    if not exchange_symbols:
+        logging.error("无法获取交易所交易对列表")
+        logging.info("=" * 80)
+        logging.info("自动补全失败：无法获取交易所交易对列表")
+        logging.info("=" * 80)
+        return stats
+    
+    all_symbols = exchange_symbols
+    
+    logging.info(f"共找到 {len(all_symbols)} 个交易所正常交易的交易对")
+    
+    if not all_symbols:
+        logging.warning("没有找到任何交易对，退出自动补全")
+        logging.info("=" * 80)
+        logging.info("自动补全完成：没有找到任何交易对")
+        logging.info("=" * 80)
+        return stats
+    
+    stats['total'] = len(all_symbols)
+    
+    # 计算当前时间作为结束时间
+    now = datetime.now(timezone.utc)
+    if interval in ['1d', '3d', '1w', '1M']:
+        # 日线及以上，使用昨天的结束时间（不包含今天）
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_time = today - timedelta(seconds=1)  # 昨天的23:59:59
+    else:
+        # 小时线及以下，使用当前时间之前的最新完整K线时间
+        interval_seconds = calculate_interval_seconds(interval)
+        current_timestamp = int(now.timestamp())
+        kline_index = current_timestamp // interval_seconds
+        current_kline_start_timestamp = kline_index * interval_seconds
+        latest_complete_kline_start_timestamp = current_kline_start_timestamp - interval_seconds
+        end_time = datetime.fromtimestamp(latest_complete_kline_start_timestamp, tz=timezone.utc)
+    
+    logging.info(f"结束时间设置为: {end_time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    logging.info(f"开始处理 {len(all_symbols)} 个交易对...")
+    logging.info("")
+    
+    # 处理每个交易对
+    for i, symbol in enumerate(all_symbols, 1):
+        logging.info(f"[{i}/{len(all_symbols)}] 处理交易对: {symbol}")
+        
+        try:
+            # 🔧 先检查交易对是否在交易所正常交易
+            is_valid = validate_symbol(symbol, skip_validation=False)
+            if not is_valid:
+                # validate_symbol 已经输出了警告信息，这里记录跳过状态并继续
+                logging.info(f"⏭️  跳过 {symbol}（已下架或暂停交易），继续处理下一个交易对...")
+                stats['skipped'] += 1
+                # 确保继续处理下一个交易对
+                logging.debug(f"跳过 {symbol} 后，继续处理第 {i+1} 个交易对")
+                # 每10个交易对输出一次进度（包括跳过的）
+                if i % 10 == 0:
+                    logging.info(f"进度: {i}/{len(all_symbols)} ({i*100//len(all_symbols)}%) | 成功: {stats['updated']+stats['new']} | 跳过: {stats['skipped']} | 无需更新: {stats['no_data_needed']} | 失败: {stats['failed']}")
+                continue
+            
+            # 交易对有效，继续处理
+            logging.debug(f"{symbol} 交易对验证通过，继续处理数据补全")
+            
+            # 获取最后更新日期
+            last_trade_date = get_last_trade_date(symbol, interval)
+            
+            if last_trade_date:
+                # 有数据，计算开始时间（最后日期的下一个K线）
+                if interval in ['1d', '3d', '1w', '1M']:
+                    # 日线及以上，解析日期
+                    last_date_obj = datetime.strptime(last_trade_date, '%Y-%m-%d').date()
+                    # 计算下一个日期
+                    if interval == '1d':
+                        next_date = last_date_obj + timedelta(days=1)
+                    elif interval == '3d':
+                        next_date = last_date_obj + timedelta(days=3)
+                    elif interval == '1w':
+                        next_date = last_date_obj + timedelta(weeks=1)
+                    elif interval == '1M':
+                        # 月份处理：计算下个月的同一天
+                        if last_date_obj.month == 12:
+                            next_date = last_date_obj.replace(year=last_date_obj.year + 1, month=1)
+                        else:
+                            next_date = last_date_obj.replace(month=last_date_obj.month + 1)
+                    else:
+                        next_date = last_date_obj + timedelta(days=1)
+                    
+                    start_time = datetime.combine(next_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+                else:
+                    # 小时线及以下，解析完整时间
+                    last_datetime_obj = datetime.strptime(last_trade_date, '%Y-%m-%d %H:%M:%S')
+                    last_datetime_obj = ensure_utc_timezone(last_datetime_obj)
+
+                    # 计算下一个K线时间
+                    interval_seconds = calculate_interval_seconds(interval)
+                    last_timestamp = int(last_datetime_obj.timestamp())
+                    next_timestamp = ((last_timestamp // interval_seconds) + 1) * interval_seconds
+                    start_time = datetime.fromtimestamp(next_timestamp, tz=timezone.utc)
+                
+                # 检查是否需要更新
+                if compare_trade_dates(last_trade_date, end_time, interval):
+                    logging.info(f"{symbol} 数据已是最新（最后日期: {last_trade_date} >= 结束时间）")
+                    stats['no_data_needed'] += 1
+                    continue
+                
+                logging.info(f"{symbol} 最后更新日期: {last_trade_date}, 开始补全从 {start_time.strftime('%Y-%m-%d %H:%M:%S')} 到 {end_time.strftime('%Y-%m-%d %H:%M:%S')} 的数据")
+                stats['updated'] += 1
+            else:
+                # 没有数据，使用默认开始时间（最近1年）
+                start_time = end_time - timedelta(days=365)
+                logging.info(f"{symbol} 没有本地数据，从 {start_time.strftime('%Y-%m-%d %H:%M:%S')} 开始下载")
+                stats['new'] += 1
+            
+            # 下载数据（跳过验证，因为已经在前面验证过了）
+            success = download_kline_data(
+                symbol=symbol,
+                interval=interval,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+                update_existing=False,  # 不更新已存在的数据，只补全缺失的
+                auto_split=auto_split,
+                request_delay=request_delay,
+                skip_symbol_validation=True  # 跳过验证，因为已经在前面验证过了
+            )
+            
+            if success:
+                logging.info(f"✓ {symbol} 数据补全成功")
+            else:
+                logging.warning(f"✗ {symbol} 数据补全失败")
+                stats['failed'] += 1
+            
+            # 批次暂停
+            if i % batch_size == 0:
+                logging.info(f"已处理 {i} 个交易对，暂停 {batch_delay} 秒...")
+                time.sleep(batch_delay)
+            
+            # 每10个交易对输出一次进度
+            if i % 10 == 0:
+                logging.info(f"进度: {i}/{len(all_symbols)} ({i*100//len(all_symbols)}%) | 成功: {stats['updated']+stats['new']} | 跳过: {stats['skipped']} | 无需更新: {stats['no_data_needed']} | 失败: {stats['failed']}")
+        
+        except Exception as e:
+            logging.error(f"处理 {symbol} 时发生错误: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
+            stats['failed'] += 1
+            logging.info(f"错误后继续处理下一个交易对...")
+            # 每10个交易对输出一次进度（包括出错的）
+            if i % 10 == 0:
+                logging.info(f"进度: {i}/{len(all_symbols)} ({i*100//len(all_symbols)}%) | 成功: {stats['updated']+stats['new']} | 跳过: {stats['skipped']} | 无需更新: {stats['no_data_needed']} | 失败: {stats['failed']}")
+            continue
+    
+    # 输出最终进度（如果还没有输出过，或者不是10的倍数）
+    if len(all_symbols) % 10 != 0 or len(all_symbols) < 10:
+        logging.info(f"进度: {len(all_symbols)}/{len(all_symbols)} (100%) | 成功: {stats['updated']+stats['new']} | 跳过: {stats['skipped']} | 无需更新: {stats['no_data_needed']} | 失败: {stats['failed']}")
+    
+    # 输出统计信息
+    logging.info("")
+    logging.info("=" * 80)
+    logging.info("自动补全完成！")
+    logging.info("=" * 80)
+    logging.info(f"总交易对数: {stats['total']}")
+    logging.info(f"✓ 更新已有数据: {stats['updated']}")
+    logging.info(f"✓ 新增交易对: {stats['new']}")
+    logging.info(f"○ 无需更新（数据已是最新）: {stats['no_data_needed']}")
+    logging.info(f"⏭️  跳过（已下架或暂停交易）: {stats['skipped']}")
+    logging.info(f"✗ 失败: {stats['failed']}")
+    logging.info(f"")
+    logging.info(f"总计处理: {stats['updated'] + stats['new'] + stats['no_data_needed'] + stats['skipped'] + stats['failed']} 个交易对")
+    logging.info("=" * 80)
+    
+    return stats
 
 
 if __name__ == "__main__":
