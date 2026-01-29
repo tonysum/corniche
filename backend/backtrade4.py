@@ -615,8 +615,9 @@ class Backtrade4Backtest:
     def get_hourly_kline_data(self, symbol: str) -> pd.DataFrame:
         """获取本地数据库中指定交易对的小时K线数据"""
         table_name = f'K1h{symbol}'
+        safe_table_name = f'"{table_name}"'
         try:
-            stmt = f"SELECT * FROM {table_name} ORDER BY trade_date ASC"
+            stmt = f"SELECT * FROM {safe_table_name} ORDER BY trade_date ASC"
             with engine.connect() as conn:
                 result = conn.execute(text(stmt))
                 data = result.fetchall()
@@ -643,6 +644,7 @@ class Backtrade4Backtest:
             24小时成交额（USDT），失败返回-1
         """
         table_name = f'K1h{symbol}'
+        safe_table_name = f'"{table_name}"'
         try:
             # 解析建仓时间
             if ' ' in entry_datetime:
@@ -653,12 +655,12 @@ class Backtrade4Backtest:
             # 计算24小时前的时间
             start_dt = entry_dt - timedelta(hours=24)
             
-            # 查询24小时内的成交额总和
+            # 查询24小时内的成交额总和（PostgreSQL 使用单引号包裹字符串）
             query = f'''
                 SELECT SUM(quote_volume) as total_volume
-                FROM {table_name}
-                WHERE trade_date >= "{start_dt.strftime('%Y-%m-%d %H:%M:%S')}"
-                AND trade_date < "{entry_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+                FROM {safe_table_name}
+                WHERE trade_date >= '{start_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+                AND trade_date < '{entry_dt.strftime('%Y-%m-%d %H:%M:%S')}'
             '''
             
             with engine.connect() as conn:
@@ -1637,33 +1639,34 @@ class Backtrade4Backtest:
                                 )
                                 # 虽然放弃建仓，但仍记录为已尝试交易（避免重复尝试）
                                 traded_symbols.add(symbol)
-                            else:
-                                # 使用触发点的价格和时间建仓
-                                entry_price = trigger_result['entry_price']
-                                entry_datetime = trigger_result['entry_datetime']
-                                hours_waited = trigger_result['hours_waited']
+                                continue  # 跳过后续处理，因为未触发建仓
+                            
+                            # 使用触发点的价格和时间建仓
+                            entry_price = trigger_result['entry_price']
+                            entry_datetime = trigger_result['entry_datetime']
+                            hours_waited = trigger_result['hours_waited']
+                            
+                            # ============================================================
+                            # 成交额过滤：高涨幅+低成交额 = 主力还没出货 = 放弃建仓
+                            # 基于主力操盘模型：
+                            #   - 主力持有90%筹码，拉盘成本低
+                            #   - 涨幅大但成交量小 → FOMO不够 → 主力高杠杆多单没法平 → 继续拉
+                            #   - 涨幅大且成交量大 → FOMO足够 → 主力平多单开空单 → 价格回调
+                            # 数据验证：高涨幅+成交额<3亿胜率仅55%，>=3亿胜率79%
+                            # ============================================================
+                            should_skip = False
+                            if self.enable_volume_filter and pct_chg >= self.high_pct_chg_threshold:
                                 
-                                # ============================================================
-                                # 成交额过滤：高涨幅+低成交额 = 主力还没出货 = 放弃建仓
-                                # 基于主力操盘模型：
-                                #   - 主力持有90%筹码，拉盘成本低
-                                #   - 涨幅大但成交量小 → FOMO不够 → 主力高杠杆多单没法平 → 继续拉
-                                #   - 涨幅大且成交量大 → FOMO足够 → 主力平多单开空单 → 价格回调
-                                # 数据验证：高涨幅+成交额<3亿胜率仅55%，>=3亿胜率79%
-                                # ============================================================
-                                should_skip = False
-                                if self.enable_volume_filter and pct_chg >= self.high_pct_chg_threshold:
-                                    
-                                    volume_24h = self.get_24h_quote_volume(symbol, entry_datetime)
-                                    
-                                    if volume_24h >= 0 and volume_24h < self.min_volume_for_high_pct:
-                                        volume_yi = volume_24h / 1e8  # 转换为亿
-                                        logging.info(
-                                            f"{next_date_str}: {symbol} 高涨幅{pct_chg:.1f}% + 成交额{volume_yi:.1f}亿 < 2亿，"
-                                            f"主力还没出完货，放弃建仓"
-                                        )
-                                        traded_symbols.add(symbol)
-                                        should_skip = True
+                                volume_24h = self.get_24h_quote_volume(symbol, entry_datetime)
+                                
+                                if volume_24h >= 0 and volume_24h < self.min_volume_for_high_pct:
+                                    volume_yi = volume_24h / 1e8  # 转换为亿
+                                    logging.info(
+                                        f"{next_date_str}: {symbol} 高涨幅{pct_chg:.1f}% + 成交额{volume_yi:.1f}亿 < 2亿，"
+                                        f"主力还没出完货，放弃建仓"
+                                    )
+                                    traded_symbols.add(symbol)
+                                    should_skip = True
                             
                             # ============================================================
                             # 实盘风控检查：检查市场情绪是否适合做空

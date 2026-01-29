@@ -205,7 +205,12 @@ export default function OrderCalculator() {
           }
         }
       } catch (err) {
-        console.error('获取24小时涨幅排名失败:', err)
+        const isConnectionError = err instanceof TypeError && err.message.includes('Failed to fetch')
+        if (isConnectionError) {
+          console.warn('无法连接到数据服务，24小时涨幅榜功能暂不可用')
+        } else {
+          console.error('获取24小时涨幅排名失败:', err)
+        }
         setTopGainers24h([])
       } finally {
         setLoadingTopGainers24h(false)
@@ -230,7 +235,12 @@ export default function OrderCalculator() {
         const gainersBinance = data.top_gainers || []
         setTopGainersBinance(gainersBinance)
       } catch (err) {
-        console.error('获取交易所API前一天涨幅排名失败:', err)
+        const isConnectionError = err instanceof TypeError && err.message.includes('Failed to fetch')
+        if (isConnectionError) {
+          console.warn('无法连接到数据服务，交易所API涨幅榜功能暂不可用')
+        } else {
+          console.error('获取交易所API前一天涨幅排名失败:', err)
+        }
         setTopGainersBinance([])
       } finally {
         setLoadingTopGainersBinance(false)

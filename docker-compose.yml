@@ -1,24 +1,6 @@
 version: '3.8'
 
 services:
-  data-service:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.backend
-    container_name: data-service
-    ports:
-      - "8001:8001"
-    volumes:
-      - ./data:/app/data
-      - ./data/backtrade_records:/app/backtrade_records
-    environment:
-      - DATA_SERVICE_PORT=8001
-      - DB_PATH=/app/data/crypto_data.db
-    working_dir: /app
-    command: python services/data_service/main.py
-    restart: unless-stopped
-    networks:
-      - crypto-network
 
   backtest-service:
     build:
@@ -57,22 +39,6 @@ services:
     networks:
       - crypto-network
 
-  frontend-data:
-    build:
-      context: ./frontend-data
-      dockerfile: Dockerfile
-    container_name: frontend-data
-    ports:
-      - "3001:3001"
-    environment:
-      - NEXT_PUBLIC_DATA_SERVICE_URL=http://localhost:8001
-      - NEXT_PUBLIC_BACKTEST_SERVICE_URL=http://localhost:8002
-      - NEXT_PUBLIC_ORDER_SERVICE_URL=http://localhost:8003
-    depends_on:
-      - data-service
-    restart: unless-stopped
-    networks:
-      - crypto-network
 
   frontend-backtrade:
     build:
@@ -82,9 +48,10 @@ services:
     ports:
       - "3002:3002"
     environment:
-      - NEXT_PUBLIC_DATA_SERVICE_URL=http://localhost:8001
       - NEXT_PUBLIC_BACKTEST_SERVICE_URL=http://localhost:8002
       - NEXT_PUBLIC_ORDER_SERVICE_URL=http://localhost:8003
+      # 如果需要数据管理功能，请配置独立的数据管理服务地址
+      # - NEXT_PUBLIC_DATA_SERVICE_URL=http://localhost:8001
     depends_on:
       - backtest-service
       - order-service

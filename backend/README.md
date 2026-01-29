@@ -4,16 +4,7 @@
 
 ## 服务列表
 
-### 1. 数据管理服务 (Data Service)
-- **端口**: 8001
-- **启动**: `python services/data_service/main.py`
-- **职责**:
-  - K线数据下载和管理
-  - 数据查询和检索
-  - 数据完整性检查
-  - 数据修复和重检
-
-### 2. 回测服务 (Backtest Service)
+### 1. 回测服务 (Backtest Service)
 - **端口**: 8002
 - **启动**: `python services/backtest_service/main.py`
 - **职责**:
@@ -37,8 +28,7 @@
 
 ### 方式2：手动启动
 ```bash
-# 终端1：启动数据管理服务
-python services/data_service/main.py
+# 终端1：启动python services/data_service/main.py
 
 # 终端2：启动回测服务
 python services/backtest_service/main.py
@@ -56,8 +46,7 @@ docker-compose -f docker-compose.services.yml up
 
 启动服务后，访问以下地址查看API文档：
 
-- **数据管理服务**: http://localhost:8001/docs
-- **回测服务**: http://localhost:8002/docs
+- **- **回测服务**: http://localhost:8002/docs
 - **订单服务**: http://localhost:8003/docs
 
 ## 服务间通信

@@ -37,7 +37,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Tuple
 from sqlalchemy import text  # pyright: ignore[reportMissingImports]
 
-from db import engine, create_table
+from db import engine, create_table, create_trade_table
 from data import get_local_symbols, get_local_kline_data
 
 # 配置日志
@@ -266,15 +266,21 @@ def get_all_top_gainers(start_date: str, end_date: str) -> pd.DataFrame:
     # 过滤掉pct_chg为NaN的行
     combined_df = combined_df[combined_df['pct_chg'].notna()]
     
+    # 先重命名列，避免后续警告
+    combined_df = combined_df.rename(columns={'trade_date_str': 'date'})
+    
     # 按日期分组，使用nlargest找出每天涨幅最大的交易对
+    # 在 apply 函数中显式选择需要的列，这样分组列会被保留，避免警告
+    def get_top_gainer(group):
+        """获取每组中涨幅最大的交易对"""
+        top = group.nlargest(1, 'pct_chg')
+        return top[['date', 'symbol', 'pct_chg']]
+    
     top_gainers = (
-        combined_df.groupby('trade_date_str', group_keys=False)
-        .apply(lambda x: x.nlargest(1, 'pct_chg'))
+        combined_df.groupby('date', group_keys=False)
+        .apply(get_top_gainer)
         .reset_index(drop=True)
     )
-    
-    # 重命名列
-    top_gainers = top_gainers.rename(columns={'trade_date_str': 'date'})
     
     # 按日期排序
     top_gainers = top_gainers.sort_values('date').reset_index(drop=True)
@@ -322,118 +328,9 @@ def get_kline_data_for_date(symbol: str, date: str) -> Optional[pd.Series]:
 
 
 def create_trade_table():
-    """创建交易记录表"""
-    table_name = 'backtrade_records'
-    with engine.connect() as conn:
-        result = conn.execute(
-            text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}';")
-        )
-        table_exists = result.fetchone() is not None
-        
-        if not table_exists:
-            text_create = f"""
-            CREATE TABLE {table_name} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entry_date TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                entry_pct_chg REAL,
-                position_size REAL NOT NULL,
-                leverage INTEGER NOT NULL,
-                exit_date TEXT,
-                exit_price REAL,
-                exit_reason TEXT,
-                profit_loss REAL,
-                profit_loss_pct REAL,
-                max_profit REAL,
-                max_loss REAL,
-                hold_days INTEGER,
-                has_added_position INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-            conn.execute(text(text_create))
-            conn.commit()
-            logging.info(f"交易记录表 '{table_name}' 创建成功")
-        else:
-            # 检查是否需要添加add_position_count字段
-            result = conn.execute(
-                text(f"PRAGMA table_info({table_name});")
-            )
-            columns = [row[1] for row in result.fetchall()]
-            if 'add_position_count' not in columns:
-                logging.info(f"添加 add_position_count 字段到表 '{table_name}'")
-                # 如果存在旧的has_added_position字段，先删除
-                if 'has_added_position' in columns:
-                    logging.info(f"删除旧的 has_added_position 字段")
-                    # SQLite不支持直接删除列，需要重建表
-                    # 先检查是否存在临时表
-                    temp_table_name = f"{table_name}_old"
-                    result_temp = conn.execute(
-                        text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{temp_table_name}';")
-                    )
-                    temp_exists = result_temp.fetchone() is not None
-                    if temp_exists:
-                        conn.execute(text(f"DROP TABLE {temp_table_name};"))
-                    
-                    # 定义新的表结构
-                    text_create_new = f"""
-                    CREATE TABLE {table_name} (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        entry_date TEXT NOT NULL,
-                        symbol TEXT NOT NULL,
-                        entry_price REAL NOT NULL,
-                        entry_pct_chg REAL,
-                        position_size REAL NOT NULL,
-                        leverage INTEGER NOT NULL,
-                        exit_date TEXT,
-                        exit_price REAL,
-                        exit_reason TEXT,
-                        profit_loss REAL,
-                        profit_loss_pct REAL,
-                        max_profit REAL,
-                        max_loss REAL,
-                        hold_days INTEGER,
-                        add_position_count INTEGER DEFAULT 0,
-                        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                    );
-                    """
-                    
-                    conn.execute(text(f"ALTER TABLE {table_name} RENAME TO {temp_table_name};"))
-                    conn.execute(text(text_create_new))
-                    
-                    # 检查旧表的列结构，确定哪些列存在
-                    result_old = conn.execute(
-                        text(f"PRAGMA table_info({temp_table_name});")
-                    )
-                    old_columns = {row[1]: row[0] for row in result_old.fetchall()}
-                    
-                    # 根据旧表的列结构构建 SELECT 语句
-                    # 如果旧表有 hold_days 列，使用它；否则使用 NULL
-                    hold_days_select = "hold_days" if "hold_days" in old_columns else "NULL"
-                    
-                    conn.execute(text(f"""
-                        INSERT INTO {table_name} 
-                        (entry_date, symbol, entry_price, entry_pct_chg, position_size, leverage, 
-                         exit_date, exit_price, exit_reason, profit_loss, profit_loss_pct, 
-                         max_profit, max_loss, hold_days, add_position_count, created_at)
-                        SELECT 
-                        entry_date, symbol, entry_price, entry_pct_chg, position_size, leverage,
-                        exit_date, exit_price, exit_reason, profit_loss, profit_loss_pct,
-                        max_profit, max_loss, {hold_days_select}, 
-                        CASE WHEN has_added_position = 1 THEN 1 ELSE 0 END,
-                        created_at
-                        FROM {temp_table_name};
-                    """))
-                    conn.execute(text(f"DROP TABLE {temp_table_name};"))
-                else:
-                    conn.execute(
-                        text(f"ALTER TABLE {table_name} ADD COLUMN add_position_count INTEGER DEFAULT 0;")
-                    )
-                conn.commit()
-            logging.info(f"交易记录表 '{table_name}' 已存在")
-        
-        return table_exists
+    """创建交易记录表（使用 db.py 中的函数）"""
+    from db import create_trade_table as _create_trade_table
+    return _create_trade_table()
 
 
 def simulate_trading(

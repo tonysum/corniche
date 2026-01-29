@@ -1,0 +1,66 @@
+{
+  "positions": {},
+  "pending_signals": [
+    {
+      "symbol": "YFIUSDT",
+      "signal_time": "2026-01-26T10:00:00",
+      "signal_close": 3301.0,
+      "buy_surge_ratio": 2.3276099565753627,
+      "target_entry_price": 3069.93,
+      "drop_pct": -0.07,
+      "timeout_time": "2026-01-28T08:46:29.821147",
+      "created_at": "2026-01-26T19:46:29.821223"
+    },
+    {
+      "symbol": "DUSDT",
+      "signal_time": "2026-01-26T10:00:00",
+      "signal_close": 0.01277,
+      "buy_surge_ratio": 2.5521872235362086,
+      "target_entry_price": 0.011876099999999999,
+      "drop_pct": -0.07,
+      "timeout_time": "2026-01-28T08:47:02.481489",
+      "created_at": "2026-01-26T19:47:02.481531"
+    },
+    {
+      "symbol": "VVVUSDT",
+      "signal_time": "2026-01-26T10:00:00",
+      "signal_close": 3.26,
+      "buy_surge_ratio": 2.260332332910656,
+      "target_entry_price": 3.0317999999999996,
+      "drop_pct": -0.07,
+      "timeout_time": "2026-01-28T08:47:03.915388",
+      "created_at": "2026-01-26T19:47:03.915414"
+    },
+    {
+      "symbol": "SKYAIUSDT",
+      "signal_time": "2026-01-26T10:00:00",
+      "signal_close": 0.03925,
+      "buy_surge_ratio": 2.387879846185047,
+      "target_entry_price": 0.0365025,
+      "drop_pct": -0.07,
+      "timeout_time": "2026-01-28T08:47:11.251403",
+      "created_at": "2026-01-26T19:47:11.251472"
+    },
+    {
+      "symbol": "BTRUSDT",
+      "signal_time": "2026-01-26T10:00:00",
+      "signal_close": 0.11142,
+      "buy_surge_ratio": 2.985172785035349,
+      "target_entry_price": 0.1036206,
+      "drop_pct": -0.07,
+      "timeout_time": "2026-01-28T08:47:19.045938",
+      "created_at": "2026-01-26T19:47:19.045956"
+    },
+    {
+      "symbol": "FFUSDT",
+      "signal_time": "2026-01-26T10:00:00",
+      "signal_close": 0.09181,
+      "buy_surge_ratio": 2.47622155940584,
+      "target_entry_price": 0.0853833,
+      "drop_pct": -0.07,
+      "timeout_time": "2026-01-28T08:47:23.031469",
+      "created_at": "2026-01-26T19:47:23.031549"
+    }
+  ],
+  "updated_at": "2026-01-26T19:57:45.300056"
+}

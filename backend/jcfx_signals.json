@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-01-29T14:03:21.145777",
+  "analysis_date": "2026-01-28",
+  "signal": {
+    "symbol": "PTBUSDT",
+    "pct_chg": 65.28046421663444,
+    "yesterday_open": 0.002068,
+    "today_open": 0.003418,
+    "today_high": 0.003728,
+    "today_low": 0.002479,
+    "today_close": 0.002652,
+    "entry_date": "2026-01-29",
+    "risk_level": "unknown",
+    "premium_passed": true,
+    "premium_avg": null,
+    "premium_current": null,
+    "volume_risk_passed": true,
+    "sell_vol_increase": 3.8797683958126594,
+    "buy_acceleration": 0.05029767207751035,
+    "funding_rate": null,
+    "funding_passed": true,
+    "should_delay": true,
+    "delay_30d": false,
+    "delay_ratio": false,
+    "delay_volume": true,
+    "dynamic_params": {
+      "leverage": 2,
+      "profit_threshold": 0.4,
+      "stop_loss_threshold": 0.45,
+      "add_position_threshold": 0.4
+    }
+  }
+}

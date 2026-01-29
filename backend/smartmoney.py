@@ -877,15 +877,21 @@ def get_all_top_gainers(start_date: str, end_date: str) -> pd.DataFrame:
     # 过滤掉pct_chg为NaN的行
     combined_df = combined_df[combined_df['pct_chg'].notna()]
     
+    # 先重命名列，避免后续警告
+    combined_df = combined_df.rename(columns={'trade_date_str': 'date'})
+    
     # 按日期分组，使用nlargest找出每天涨幅最大的交易对
+    # 在 apply 函数中显式选择需要的列，这样分组列会被保留，避免警告
+    def get_top_gainer(group):
+        """获取每组中涨幅最大的交易对"""
+        top = group.nlargest(1, 'pct_chg')
+        return top[['date', 'symbol', 'pct_chg']]
+    
     top_gainers = (
-        combined_df.groupby('trade_date_str', group_keys=False)
-        .apply(lambda x: x.nlargest(1, 'pct_chg'))
+        combined_df.groupby('date', group_keys=False)
+        .apply(get_top_gainer)
         .reset_index(drop=True)
     )
-    
-    # 重命名列
-    top_gainers = top_gainers.rename(columns={'trade_date_str': 'date'})
     
     # 按日期排序
     top_gainers = top_gainers.sort_values('date').reset_index(drop=True)
@@ -915,6 +921,7 @@ def get_24h_quote_volume(symbol: str, entry_datetime: str) -> float:
     """
     # 使用项目标准的表名格式 K1h{symbol}
     table_name = f'K1h{symbol}'
+    safe_table_name = f'"{table_name}"'
     try:
         # 解析建仓时间
         if ' ' in entry_datetime:
@@ -925,12 +932,12 @@ def get_24h_quote_volume(symbol: str, entry_datetime: str) -> float:
         # 计算24小时前的时间
         start_dt = entry_dt - timedelta(hours=24)
         
-        # 查询24小时内的成交额总和
+        # 查询24小时内的成交额总和（PostgreSQL 使用单引号包裹字符串，双引号包裹表名）
         query = f'''
             SELECT SUM(quote_volume) as total_volume
-            FROM {table_name}
-            WHERE trade_date >= "{start_dt.strftime('%Y-%m-%d %H:%M:%S')}"
-            AND trade_date < "{entry_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+            FROM {safe_table_name}
+            WHERE trade_date >= '{start_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+            AND trade_date < '{entry_dt.strftime('%Y-%m-%d %H:%M:%S')}'
         '''
         
         with engine.connect() as conn:
@@ -1393,54 +1400,9 @@ def check_daily_hourly_exit_safe(position: dict, check_date: str) -> dict:
 
 
 def create_trade_table():
-    """创建交易记录表"""
-    table_name = 'backtrade_records'
-    with engine.connect() as conn:
-        result = conn.execute(
-            text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}';")
-        )
-        table_exists = result.fetchone() is not None
-        
-        if not table_exists:
-            text_create = f"""
-            CREATE TABLE {table_name} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entry_date TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                entry_pct_chg REAL,
-                position_size REAL NOT NULL,
-                leverage INTEGER NOT NULL,
-                exit_date TEXT,
-                exit_price REAL,
-                exit_reason TEXT,
-                profit_loss REAL,
-                profit_loss_pct REAL,
-                max_profit REAL,
-                max_loss REAL,
-                hold_hours INTEGER,
-                has_added_position INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-            conn.execute(text(text_create))
-            conn.commit()
-            logging.info(f"交易记录表 '{table_name}' 创建成功")
-        else:
-            # 检查是否需要添加has_added_position字段
-            result = conn.execute(
-                text(f"PRAGMA table_info({table_name});")
-            )
-            columns = [row[1] for row in result.fetchall()]
-            if 'has_added_position' not in columns:
-                logging.info(f"添加 has_added_position 字段到表 '{table_name}'")
-                conn.execute(
-                    text(f"ALTER TABLE {table_name} ADD COLUMN has_added_position INTEGER DEFAULT 0;")
-                )
-                conn.commit()
-            logging.info(f"交易记录表 '{table_name}' 已存在")
-        
-        return table_exists
+    """创建交易记录表（使用 db.py 中的函数）"""
+    from db import create_trade_table as _create_trade_table
+    return _create_trade_table()
 
 
 def simulate_trading(start_date: str, end_date: str):

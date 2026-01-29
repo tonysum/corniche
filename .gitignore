@@ -49,3 +49,9 @@ ubuntu/
 
 #pem
 *.pem
+
+#corniche_live_bot
+corniche_live_bot/
+
+.agent/
+.trae/

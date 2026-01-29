@@ -9,6 +9,7 @@ const nextConfig: NextConfig = {
   ...(process.env.NODE_ENV === 'development' && {
     allowedDevOrigins: [
       '8.216.33.6',  // 服务器 IP
+      '192.168.2.103',  // 本地网络 IP
       'localhost',
       '127.0.0.1',
       // 如果需要允许所有 IP（不推荐，仅用于测试）

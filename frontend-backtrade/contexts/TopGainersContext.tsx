@@ -76,15 +76,22 @@ export function TopGainersProvider({ children }: { children: ReactNode }) {
         })
       }
     } catch (err) {
-      console.error('获取涨幅排名失败:', err)
+      // 如果是连接错误，降级为警告，避免控制台刷屏
+      const isConnectionError = err instanceof TypeError && err.message.includes('Failed to fetch')
+      
+      if (isConnectionError) {
+        console.warn(`无法连接到数据服务 (${API_URLS.data})，涨幅榜功能暂不可用`)
+      } else {
+        console.error('获取涨幅排名失败:', err)
+      }
       
       // 更友好的错误信息
       let errorMessage = '获取涨幅排名失败'
-      if (err instanceof TypeError && err.message.includes('Failed to fetch')) {
-        errorMessage = `无法连接到数据服务 (${API_URLS.data})，请确保后端服务已启动`
+      if (isConnectionError) {
+        errorMessage = `数据服务暂不可用`
       } else if (err instanceof Error) {
         if (err.name === 'AbortError' || err.message.includes('timeout') || err.message.includes('aborted')) {
-          errorMessage = '请求超时，请检查网络连接或后端服务状态'
+          errorMessage = '请求超时'
         } else {
           errorMessage = err.message
         }

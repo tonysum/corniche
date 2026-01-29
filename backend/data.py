@@ -15,9 +15,15 @@ def get_local_symbols(interval: str = "1d"):
     """获取本地数据库中指定时间间隔的交易对列表"""
     # 表名格式: K{interval}{symbol}, 例如: K1dBTCUSDT
     prefix = f'K{interval}'
-    stmt = f"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{prefix}%'"
+    stmt = """
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name LIKE :prefix
+        ORDER BY table_name
+    """
     with engine.connect() as conn:
-        result = conn.execute(text(stmt))
+        result = conn.execute(text(stmt), {"prefix": f"{prefix}%"})
         table_names = result.fetchall()
     # 去掉前缀 'K{interval}', 例如 'K1d' -> ''
     prefix_len = len(prefix)
@@ -44,7 +50,9 @@ MISSING_SYMBOLS = find_missing_symbols()
 def get_local_kline_data(symbol: str, interval: str = "1d") -> pd.DataFrame:
     """获取本地数据库中指定交易对的K线数据"""
     table_name = f'K{interval}{symbol}'
-    stmt = f"SELECT * FROM {table_name} ORDER BY trade_date ASC"
+    # PostgreSQL 需要使用双引号包裹表名（如果表名是用双引号创建的）
+    safe_table_name = f'"{table_name}"'
+    stmt = f"SELECT * FROM {safe_table_name} ORDER BY trade_date ASC"
     try:
         with engine.connect() as conn:
             result = conn.execute(text(stmt))
@@ -111,6 +119,7 @@ def get_24h_quote_volume(symbol: str, entry_datetime: str) -> float:
         24小时成交额（USDT），失败返回-1
     """
     table_name = f'K1h{symbol}'
+    safe_table_name = f'"{table_name}"'
     try:
         # 解析建仓时间
         if ' ' in entry_datetime:
@@ -121,12 +130,12 @@ def get_24h_quote_volume(symbol: str, entry_datetime: str) -> float:
         # 计算24小时前的时间
         start_dt = entry_dt - timedelta(hours=24)
         
-        # 查询24小时内的成交额总和
+        # 查询24小时内的成交额总和（PostgreSQL 使用单引号包裹字符串）
         query = f'''
             SELECT SUM(quote_volume) as total_volume
-            FROM {table_name}
-            WHERE trade_date >= "{start_dt.strftime('%Y-%m-%d %H:%M:%S')}"
-            AND trade_date < "{entry_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+            FROM {safe_table_name}
+            WHERE trade_date >= '{start_dt.strftime('%Y-%m-%d %H:%M:%S')}'
+            AND trade_date < '{entry_dt.strftime('%Y-%m-%d %H:%M:%S')}'
         '''
         
         with engine.connect() as conn:
@@ -278,15 +287,17 @@ def get_all_top_gainers(start_date: str, end_date: str) -> pd.DataFrame:
     # 过滤掉pct_chg为NaN的行
     combined_df = combined_df[combined_df['pct_chg'].notna()]
     
-    # 按日期分组，使用nlargest找出每天涨幅最大的交易对
+    # 先重命名列，避免后续警告
+    combined_df = combined_df.rename(columns={'trade_date_str': 'date'})
+    
+    # 按日期分组，找出每天涨幅最大的交易对
+    # 使用 sort_values + head(1) 代替 apply，以避免 pandas FutureWarning 并提升性能
     top_gainers = (
-        combined_df.groupby('trade_date_str', group_keys=False)
-        .apply(lambda x: x.nlargest(1, 'pct_chg'))
+        combined_df.sort_values(['date', 'pct_chg'], ascending=[True, False])
+        .groupby('date')
+        .head(1)
         .reset_index(drop=True)
     )
-    
-    # 重命名列
-    top_gainers = top_gainers.rename(columns={'trade_date_str': 'date'})
     
     # 按日期排序
     top_gainers = top_gainers.sort_values('date').reset_index(drop=True)
@@ -313,8 +324,14 @@ def delete_all_tables(confirm: bool = False) -> int:
         return 0
     
     with engine.connect() as conn:
-        # 获取所有表名
-        stmt = "SELECT name FROM sqlite_master WHERE type='table'"
+        # 获取所有表名（PostgreSQL）
+        stmt = """
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+        """
         result = conn.execute(text(stmt))
         table_names = [row[0] for row in result.fetchall()]
         
@@ -361,13 +378,21 @@ def delete_kline_data(
     from sqlalchemy import text
     
     table_name = f'K{interval}{symbol}'
+    safe_table_name = f'"{table_name}"'
     
-    # 检查表是否存在
+    # 检查表是否存在（PostgreSQL）
     with engine.connect() as conn:
         result = conn.execute(
-            text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}';")
+            text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND (table_name = :table_name OR table_name = LOWER(:table_name))
+                );
+            """),
+            {"table_name": table_name}
         )
-        table_exists = result.fetchone() is not None
+        table_exists = result.fetchone()[0]
         
         if not table_exists:
             if verbose:
@@ -380,7 +405,7 @@ def delete_kline_data(
         
         # 如果没有指定时间范围，删除整个表
         if start_time is None and end_time is None:
-            conn.execute(text(f"DROP TABLE IF EXISTS {table_name};"))
+            conn.execute(text(f'DROP TABLE IF EXISTS {safe_table_name};'))
             conn.commit()
             if verbose:
                 print(f"已删除整个表: {table_name}")
@@ -392,7 +417,7 @@ def delete_kline_data(
         
         # 删除指定时间范围内的数据
         # 先获取删除前的记录数
-        count_stmt = f"SELECT COUNT(*) FROM {table_name}"
+        count_stmt = f"SELECT COUNT(*) FROM {safe_table_name}"
         count_result = conn.execute(text(count_stmt))
         before_count = count_result.fetchone()[0]
         
@@ -440,7 +465,7 @@ def delete_kline_data(
             conditions.append(f"trade_date <= '{end_str}'")
         
         where_clause = " AND ".join(conditions)
-        delete_stmt = f"DELETE FROM {table_name} WHERE {where_clause}"
+        delete_stmt = f"DELETE FROM {safe_table_name} WHERE {where_clause}"
         
         try:
             conn.execute(text(delete_stmt))

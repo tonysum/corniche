@@ -3,10 +3,11 @@
 import { useState } from 'react'
 import BacktestForm from '@/components/BacktestForm'
 import OrderCalculator from '@/components/OrderCalculator'
+import LiveTradingDashboard from '@/components/LiveTradingDashboard'
 import { TopGainersProvider } from '@/contexts/TopGainersContext'
 
 export default function BacktradeDashboard() {
-  const [activeTab, setActiveTab] = useState<'backtest' | 'order'>('backtest')
+  const [activeTab, setActiveTab] = useState<'backtest' | 'order' | 'live'>('backtest')
 
   return (
     <TopGainersProvider>
@@ -17,7 +18,7 @@ export default function BacktradeDashboard() {
               <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-purple-400 to-pink-600 bg-clip-text text-transparent">
                 回测交易 Dashboard
               </h1>
-              <p className="text-gray-400">策略回测和合约交易工具</p>
+              <p className="text-gray-400">策略回测、实盘交易与合约计算工具</p>
             </div>
           </header>
 
@@ -43,12 +44,23 @@ export default function BacktradeDashboard() {
             >
               合约下单
             </button>
+            <button
+              onClick={() => setActiveTab('live')}
+              className={`px-6 py-3 font-medium transition-colors ${
+                activeTab === 'live'
+                  ? 'text-green-400 border-b-2 border-green-400'
+                  : 'text-gray-400 hover:text-gray-300'
+              }`}
+            >
+              实盘交易
+            </button>
           </div>
 
           {/* 内容区域 */}
           <div className="bg-gray-800/50 backdrop-blur-sm rounded-lg shadow-xl p-6">
             {activeTab === 'backtest' && <BacktestForm />}
             {activeTab === 'order' && <OrderCalculator />}
+            {activeTab === 'live' && <LiveTradingDashboard />}
           </div>
         </div>
       </main>

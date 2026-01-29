@@ -41,8 +41,16 @@ export function TopGainersProvider({ children }: { children: ReactNode }) {
       setTopGainers(data.top_gainers || [])
       setTopGainersDate(data.date || '')
     } catch (err) {
-      console.error('获取涨幅排名失败:', err)
-      setError(err instanceof Error ? err.message : '获取涨幅排名失败')
+      // 如果是连接错误，降级为警告
+      const isConnectionError = err instanceof TypeError && err.message.includes('Failed to fetch')
+      
+      if (isConnectionError) {
+        console.warn(`无法连接到数据服务 (${API_URLS.data})，涨幅榜功能暂不可用`)
+      } else {
+        console.error('获取涨幅排名失败:', err)
+      }
+      
+      setError(isConnectionError ? '数据服务暂不可用' : (err instanceof Error ? err.message : '获取涨幅排名失败'))
       setTopGainers([])
     } finally {
       setLoading(false)

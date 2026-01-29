@@ -77,7 +77,7 @@ from typing import List, Optional, Dict, Tuple
 from sqlalchemy import text  # pyright: ignore[reportMissingImports]
 from pathlib import Path
 
-from db import engine, create_table
+from db import engine, create_table, create_trade_table
 from data import get_local_symbols, get_local_kline_data
 
 # 配置日志
@@ -310,15 +310,21 @@ INFO:root:============================================================
         # 过滤掉pct_chg为NaN的行
         combined_df = combined_df[combined_df['pct_chg'].notna()]
         
+        # 先重命名列，避免后续警告
+        combined_df = combined_df.rename(columns={'trade_date_str': 'date'})
+        
         # 按日期分组，使用nlargest找出每天涨幅最大的交易对
+        # 在 apply 函数中显式选择需要的列，这样分组列会被保留，避免警告
+        def get_top_gainer(group):
+            """获取每组中涨幅最大的交易对"""
+            top = group.nlargest(1, 'pct_chg')
+            return top[['date', 'symbol', 'pct_chg']]
+        
         top_gainers = (
-            combined_df.groupby('trade_date_str', group_keys=False)
-            .apply(lambda x: x.nlargest(1, 'pct_chg'))
+            combined_df.groupby('date', group_keys=False)
+            .apply(get_top_gainer)
             .reset_index(drop=True)
         )
-        
-        # 重命名列
-        top_gainers = top_gainers.rename(columns={'trade_date_str': 'date'})
         
         # 按日期排序
         top_gainers = top_gainers.sort_values('date').reset_index(drop=True)
@@ -534,153 +540,288 @@ INFO:root:============================================================
         """创建交易记录表"""
         table_name = 'backtrade_records'
         with engine.connect() as conn:
+            # PostgreSQL 使用 information_schema 查询表是否存在
             result = conn.execute(
-                text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}';")
+                text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = :table_name
+                    );
+                """),
+                {"table_name": table_name}
             )
-            table_exists = result.fetchone() is not None
+            table_exists = result.fetchone()[0]
             
             if not table_exists:
+                # PostgreSQL 表创建语句
                 text_create = f"""
-                CREATE TABLE {table_name} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entry_date TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                entry_pct_chg REAL,
-                position_size REAL NOT NULL,
-                leverage INTEGER NOT NULL,
-                exit_date TEXT,
-                exit_price REAL,
-                exit_reason TEXT,
-                profit_loss REAL,
-                profit_loss_pct REAL,
-                max_profit REAL,
-                max_loss REAL,
-                hold_days INTEGER,
-                        add_position_count INTEGER DEFAULT 0,
-                        delay_entry INTEGER DEFAULT 0,
-                        entry_reason TEXT DEFAULT 'immediate',
-                        delay_hours INTEGER,
-                        exit_hour TEXT,
-                        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                    );
-                    """
+                CREATE TABLE "{table_name}" (
+                    id BIGSERIAL PRIMARY KEY,
+                    entry_date VARCHAR(50) NOT NULL,
+                    symbol VARCHAR(50) NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    entry_pct_chg DOUBLE PRECISION,
+                    position_size DOUBLE PRECISION NOT NULL,
+                    leverage INTEGER NOT NULL,
+                    exit_date VARCHAR(50),
+                    exit_price DOUBLE PRECISION,
+                    exit_reason TEXT,
+                    profit_loss DOUBLE PRECISION,
+                    profit_loss_pct DOUBLE PRECISION,
+                    max_profit DOUBLE PRECISION,
+                    max_loss DOUBLE PRECISION,
+                    hold_days INTEGER,
+                    add_position_count INTEGER DEFAULT 0,
+                    delay_entry INTEGER DEFAULT 0,
+                    entry_reason TEXT DEFAULT 'immediate',
+                    delay_hours INTEGER,
+                    exit_hour TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """
                 conn.execute(text(text_create))
                 conn.commit()
                 logging.info(f"交易记录表 '{table_name}' 创建成功")
             else:
-                # 检查并添加缺失的字段
+                # 检查并添加缺失的字段（PostgreSQL）
                 result = conn.execute(
-                    text(f"PRAGMA table_info({table_name});")
+                    text("""
+                        SELECT column_name 
+                        FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                        AND table_name = :table_name;
+                    """),
+                    {"table_name": table_name}
                 )
-                columns = [row[1] for row in result.fetchall()]
+                columns = [row[0] for row in result.fetchall()]
                 
-                # 添加 add_position_count 字段
+                # 如果存在旧的has_added_position字段，需要迁移数据
+                if 'has_added_position' in columns and 'add_position_count' not in columns:
+                    logging.info(f"迁移 has_added_position 数据到 add_position_count 字段")
+                    try:
+                        # 先检查 has_added_position 列的数据类型
+                        result = conn.execute(
+                            text("""
+                                SELECT data_type 
+                                FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                AND table_name = :table_name 
+                                AND column_name = 'has_added_position';
+                            """),
+                            {"table_name": table_name}
+                        )
+                        type_row = result.fetchone()
+                        has_added_position_type = type_row[0] if type_row else None
+                        
+                        conn.execute(
+                            text(f'ALTER TABLE "{table_name}" ADD COLUMN add_position_count INTEGER DEFAULT 0;')
+                        )
+                        
+                        # 根据 has_added_position 的数据类型进行不同的处理
+                        if has_added_position_type == 'boolean':
+                            # 如果是 boolean 类型，使用布尔值比较
+                            conn.execute(
+                                text(f'UPDATE "{table_name}" SET add_position_count = CASE WHEN has_added_position = true THEN 1 ELSE 0 END;')
+                            )
+                        else:
+                            # 如果是整数类型，直接比较
+                            conn.execute(
+                                text(f'UPDATE "{table_name}" SET add_position_count = CASE WHEN has_added_position = 1 THEN 1 ELSE 0 END;')
+                            )
+                        conn.commit()
+                        # 更新 columns 列表
+                        columns.append('add_position_count')
+                    except Exception as e:
+                        conn.rollback()
+                        # 如果列已存在，忽略错误
+                        if 'already exists' not in str(e).lower() and 'duplicatecolumn' not in str(e).lower():
+                            raise
+                        logging.warning(f"列 add_position_count 已存在，跳过添加")
+                        # 重新查询列信息
+                        result = conn.execute(
+                            text("""
+                                SELECT column_name 
+                                FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                AND table_name = :table_name;
+                            """),
+                            {"table_name": table_name}
+                        )
+                        columns = [row[0] for row in result.fetchall()]
+                    
+                    # 删除旧字段
+                    conn.execute(
+                        text(f'ALTER TABLE "{table_name}" DROP COLUMN IF EXISTS has_added_position;')
+                    )
+                    conn.commit()
+                    # 更新 columns 列表
+                    if 'has_added_position' in columns:
+                        columns.remove('has_added_position')
+                elif 'has_added_position' in columns:
+                    # 如果两个字段都存在，只删除旧的
+                    logging.info(f"删除旧的 has_added_position 字段")
+                    conn.execute(
+                        text(f'ALTER TABLE "{table_name}" DROP COLUMN IF EXISTS has_added_position;')
+                    )
+                    conn.commit()
+                    # 更新 columns 列表
+                    if 'has_added_position' in columns:
+                        columns.remove('has_added_position')
+                
+                # 添加缺失的字段（PostgreSQL 支持直接添加和删除列）
+                # 使用异常处理避免重复添加列
                 if 'add_position_count' not in columns:
                     logging.info(f"添加 add_position_count 字段到表 '{table_name}'")
-                    # 如果存在旧的has_added_position字段，先删除
-                    if 'has_added_position' in columns:
-                        logging.info(f"删除旧的 has_added_position 字段")
-                        # SQLite不支持直接删除列，需要重建表
-                        # 先检查是否存在临时表
-                        temp_table_name = f"{table_name}_old"
-                        result_temp = conn.execute(
-                            text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{temp_table_name}';")
-                        )
-                        temp_exists = result_temp.fetchone() is not None
-                        if temp_exists:
-                            conn.execute(text(f"DROP TABLE {temp_table_name};"))
-                        
-                        # 定义新的表结构
-                        text_create_new = f"""
-                        CREATE TABLE {table_name} (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            entry_date TEXT NOT NULL,
-                            symbol TEXT NOT NULL,
-                            entry_price REAL NOT NULL,
-                            entry_pct_chg REAL,
-                            position_size REAL NOT NULL,
-                            leverage INTEGER NOT NULL,
-                            exit_date TEXT,
-                            exit_price REAL,
-                            exit_reason TEXT,
-                            profit_loss REAL,
-                            profit_loss_pct REAL,
-                            max_profit REAL,
-                            max_loss REAL,
-                            hold_days INTEGER,
-                            add_position_count INTEGER DEFAULT 0,
-                            delay_entry INTEGER DEFAULT 0,
-                            entry_reason TEXT,
-                            delay_hours INTEGER,
-                            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                        );
-                        """
-                        
-                        conn.execute(text(f"ALTER TABLE {table_name} RENAME TO {temp_table_name};"))
-                        conn.execute(text(text_create_new))
-                        
-                        # 检查旧表的列结构，确定哪些列存在
-                        result_old = conn.execute(
-                            text(f"PRAGMA table_info({temp_table_name});")
-                        )
-                        old_columns = {row[1]: row[0] for row in result_old.fetchall()}
-                        
-                        # 根据旧表的列结构构建 SELECT 语句
-                        # 如果旧表有 hold_days 列，使用它；否则使用 NULL
-                        hold_days_select = "hold_days" if "hold_days" in old_columns else "NULL"
-                        # 如果旧表有 created_at 列，使用它；否则使用 CURRENT_TIMESTAMP
-                        created_at_select = "created_at" if "created_at" in old_columns else "CURRENT_TIMESTAMP"
-                        
-                        conn.execute(text(f"""
-                            INSERT INTO {table_name} 
-                            (entry_date, symbol, entry_price, entry_pct_chg, position_size, leverage, 
-                             exit_date, exit_price, exit_reason, profit_loss, profit_loss_pct, 
-                             max_profit, max_loss, hold_days, add_position_count, delay_entry, entry_reason, delay_hours, created_at)
-                            SELECT 
-                            entry_date, symbol, entry_price, entry_pct_chg, position_size, leverage,
-                            exit_date, exit_price, exit_reason, profit_loss, profit_loss_pct,
-                            max_profit, max_loss, {hold_days_select}, 
-                            CASE WHEN has_added_position = 1 THEN 1 ELSE 0 END,
-                            0, 'immediate', NULL,
-                            {created_at_select}
-                            FROM {temp_table_name};
-                        """))
-                        conn.execute(text(f"DROP TABLE {temp_table_name};"))
-                    else:
+                    try:
                         conn.execute(
-                            text(f"ALTER TABLE {table_name} ADD COLUMN add_position_count INTEGER DEFAULT 0;")
+                            text(f'ALTER TABLE "{table_name}" ADD COLUMN add_position_count INTEGER DEFAULT 0;')
                         )
+                        conn.commit()
+                        columns.append('add_position_count')
+                    except Exception as e:
+                        conn.rollback()
+                        # 如果列已存在，忽略错误
+                        if 'already exists' not in str(e).lower() and 'duplicatecolumn' not in str(e).lower():
+                            raise
+                        logging.warning(f"列 add_position_count 已存在，跳过添加")
+                
+                if 'delay_entry' not in columns:
+                    logging.info(f"添加 delay_entry 字段到表 '{table_name}'")
+                    try:
+                        conn.execute(
+                            text(f'ALTER TABLE "{table_name}" ADD COLUMN delay_entry INTEGER DEFAULT 0;')
+                        )
+                        conn.commit()
+                        columns.append('delay_entry')
+                    except Exception as e:
+                        conn.rollback()
+                        if 'already exists' not in str(e).lower() and 'duplicatecolumn' not in str(e).lower():
+                            raise
+                        logging.warning(f"列 delay_entry 已存在，跳过添加")
+                
+                if 'entry_reason' not in columns:
+                    logging.info(f"添加 entry_reason 字段到表 '{table_name}'")
+                    try:
+                        conn.execute(
+                            text(f'ALTER TABLE "{table_name}" ADD COLUMN entry_reason TEXT DEFAULT \'immediate\';')
+                        )
+                        conn.commit()
+                        columns.append('entry_reason')
+                    except Exception as e:
+                        conn.rollback()
+                        if 'already exists' not in str(e).lower() and 'duplicatecolumn' not in str(e).lower():
+                            raise
+                        logging.warning(f"列 entry_reason 已存在，跳过添加")
+                
+                if 'delay_hours' not in columns:
+                    logging.info(f"添加 delay_hours 字段到表 '{table_name}'")
+                    try:
+                        conn.execute(
+                            text(f'ALTER TABLE "{table_name}" ADD COLUMN delay_hours INTEGER;')
+                        )
+                        conn.commit()
+                        columns.append('delay_hours')
+                    except Exception as e:
+                        conn.rollback()
+                        if 'already exists' not in str(e).lower() and 'duplicatecolumn' not in str(e).lower():
+                            raise
+                        logging.warning(f"列 delay_hours 已存在，跳过添加")
+                
+                if 'exit_hour' not in columns:
+                    logging.info(f"添加 exit_hour 字段到表 '{table_name}'")
+                    try:
+                        conn.execute(
+                            text(f'ALTER TABLE "{table_name}" ADD COLUMN exit_hour TEXT;')
+                        )
+                        conn.commit()
+                        columns.append('exit_hour')
+                    except Exception as e:
+                        conn.rollback()
+                        if 'already exists' not in str(e).lower() and 'duplicatecolumn' not in str(e).lower():
+                            raise
+                        logging.warning(f"列 exit_hour 已存在，跳过添加")
+                
+                # 处理 hold_days 列：如果存在 hold_hours，迁移数据后删除；如果不存在 hold_days，添加它
+                if 'hold_hours' in columns and 'hold_days' not in columns:
+                    logging.info(f"迁移 hold_hours 数据到 hold_days 字段")
+                    try:
+                        # 添加 hold_days 列
+                        conn.execute(
+                            text(f'ALTER TABLE "{table_name}" ADD COLUMN hold_days INTEGER;')
+                        )
+                        # 将 hold_hours 转换为 hold_days（除以24，向下取整）
+                        # 注意：hold_hours 可能是 bigint 或 text 类型
+                        # 统一转换为文本处理，然后转换为整数
+                        conn.execute(
+                            text(f"""
+                                UPDATE "{table_name}" 
+                                SET hold_days = CASE 
+                                    WHEN hold_hours IS NOT NULL 
+                                    THEN (
+                                        CASE 
+                                            WHEN TRIM(hold_hours::text) != '' 
+                                                AND hold_hours::text ~ '^[0-9]+$'
+                                            THEN (TRIM(hold_hours::text)::INTEGER) / 24
+                                            ELSE NULL
+                                        END
+                                    )
+                                    ELSE NULL 
+                                END;
+                            """)
+                        )
+                        conn.commit()
+                        columns.append('hold_days')
+                    except Exception as e:
+                        conn.rollback()
+                        if 'already exists' not in str(e).lower() and 'duplicatecolumn' not in str(e).lower():
+                            raise
+                        logging.warning(f"列 hold_days 已存在，跳过添加")
+                        # 重新查询列信息
+                        result = conn.execute(
+                            text("""
+                                SELECT column_name 
+                                FROM information_schema.columns 
+                                WHERE table_schema = 'public' 
+                                AND table_name = :table_name;
+                            """),
+                            {"table_name": table_name}
+                        )
+                        columns = [row[0] for row in result.fetchall()]
+                    
+                    # 删除旧字段
+                    conn.execute(
+                        text(f'ALTER TABLE "{table_name}" DROP COLUMN IF EXISTS hold_hours;')
+                    )
                     conn.commit()
-            
-            # 添加延迟入场相关字段
-            if 'delay_entry' not in columns:
-                logging.info(f"添加 delay_entry 字段到表 '{table_name}'")
-                conn.execute(
-                    text(f"ALTER TABLE {table_name} ADD COLUMN delay_entry INTEGER DEFAULT 0;")
-                )
-                conn.commit()
-            
-            if 'entry_reason' not in columns:
-                logging.info(f"添加 entry_reason 字段到表 '{table_name}'")
-                conn.execute(
-                    text(f"ALTER TABLE {table_name} ADD COLUMN entry_reason TEXT DEFAULT 'immediate';")
-                )
-                conn.commit()
-            
-            if 'delay_hours' not in columns:
-                logging.info(f"添加 delay_hours 字段到表 '{table_name}'")
-                conn.execute(
-                    text(f"ALTER TABLE {table_name} ADD COLUMN delay_hours INTEGER;")
-                )
-                conn.commit()
-            
-            if 'exit_hour' not in columns:
-                logging.info(f"添加 exit_hour 字段到表 '{table_name}'")
-                conn.execute(
-                    text(f"ALTER TABLE {table_name} ADD COLUMN exit_hour TEXT;")
-                )
-                conn.commit()
+                    # 更新 columns 列表
+                    if 'hold_hours' in columns:
+                        columns.remove('hold_hours')
+                elif 'hold_hours' in columns:
+                    # 如果两个字段都存在，只删除旧的
+                    logging.info(f"删除旧的 hold_hours 字段")
+                    conn.execute(
+                        text(f'ALTER TABLE "{table_name}" DROP COLUMN IF EXISTS hold_hours;')
+                    )
+                    conn.commit()
+                    # 更新 columns 列表
+                    if 'hold_hours' in columns:
+                        columns.remove('hold_hours')
+                
+                # 如果不存在 hold_days 列，添加它
+                if 'hold_days' not in columns:
+                    logging.info(f"添加 hold_days 字段到表 '{table_name}'")
+                    try:
+                        conn.execute(
+                            text(f'ALTER TABLE "{table_name}" ADD COLUMN hold_days INTEGER;')
+                        )
+                        conn.commit()
+                        columns.append('hold_days')
+                    except Exception as e:
+                        conn.rollback()
+                        if 'already exists' not in str(e).lower() and 'duplicatecolumn' not in str(e).lower():
+                            raise
+                        logging.warning(f"列 hold_days 已存在，跳过添加")
                 
                 logging.info(f"交易记录表 '{table_name}' 已存在")
             
@@ -1496,6 +1637,10 @@ INFO:root:============================================================
         # 保存交易记录到数据库和CSV文件
         if self.trade_records:
             df_trades = pd.DataFrame(self.trade_records)
+            
+            # 将 boolean 类型的 delay_entry 转换为 integer（PostgreSQL 需要）
+            if 'delay_entry' in df_trades.columns:
+                df_trades['delay_entry'] = df_trades['delay_entry'].astype(int)
             
             # 保存到数据库
             df_trades.to_sql(

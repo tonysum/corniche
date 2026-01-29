@@ -250,9 +250,15 @@ def get_local_symbols(interval: str = "1d") -> List[str]:
     """获取本地数据库中已存在的交易对列表"""
     # 表名格式: K{interval}{symbol}, 例如: K1dBTCUSDT
     prefix = f'K{interval}'
-    stmt = f"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{prefix}%'"
+    stmt = """
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name LIKE :prefix
+        ORDER BY table_name
+    """
     with engine.connect() as conn:
-        result = conn.execute(text(stmt))
+        result = conn.execute(text(stmt), {"prefix": f"{prefix}%"})
         table_names = result.fetchall()
     # 去掉前缀 'K{interval}', 例如 'K1d' -> ''
     prefix_len = len(prefix)

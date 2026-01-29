@@ -128,21 +128,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
-# 启动数据管理服务（端口8001）
-echo "启动数据管理服务 (端口 8001)..."
-if [[ -n "$RELOAD_FLAG" ]]; then
-    # 使用 uvicorn 命令行启动，支持 --reload
-    # 注意：需要在backend目录下运行，因为服务文件中有路径设置
-    "$PYTHON_CMD" -m uvicorn services.data_service.main:app --host 0.0.0.0 --port 8001 $RELOAD_FLAG &
-    DATA_SERVICE_PID=$!
-else
-    # 直接运行 Python 文件
-    "$PYTHON_CMD" services/data_service/main.py &
-    DATA_SERVICE_PID=$!
-fi
-
-# 等待服务启动
-sleep 2
+# 数据管理服务已独立为单独项目，不再在此启动
+# 如果需要数据管理功能，请启动独立的数据管理服务
 
 # 启动回测服务（端口8002）
 echo "启动回测服务 (端口 8002)..."
@@ -176,20 +163,18 @@ sleep 2
 
 echo ""
 echo "所有服务已启动！"
-echo "数据管理服务 PID: $DATA_SERVICE_PID (端口 8001)"
 echo "回测服务 PID: $BACKTEST_SERVICE_PID (端口 8002)"
 echo "订单服务 PID: $ORDER_SERVICE_PID (端口 8003)"
 echo ""
 echo "API文档:"
-echo "  数据管理服务: http://localhost:8001/docs"
 echo "  回测服务: http://localhost:8002/docs"
 echo "  订单服务: http://localhost:8003/docs"
+echo ""
+echo "注意: 数据管理服务已独立为单独项目，请单独启动"
 echo ""
 echo "按 Ctrl+C 停止所有服务"
 
 # 等待用户中断
-trap "echo ''; echo '正在停止所有服务...'; kill $DATA_SERVICE_PID $BACKTEST_SERVICE_PID $ORDER_SERVICE_PID; exit" INT TERM
-
 # 保持脚本运行
 wait
 

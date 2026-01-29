@@ -104,7 +104,8 @@ class SQLiteToPostgreSQLMigrator:
         logging.info(f"已连接 SQLite 数据库: {sqlite_path}")
         
         # 连接 PostgreSQL（带重试机制）
-        pg_url = f"postgresql://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_db}"
+        encoded_password = quote_plus(pg_password)
+        pg_url = f"postgresql://{pg_user}:{encoded_password}@{pg_host}:{pg_port}/{pg_db}"
         max_retries = 3
         retry_delay = 5  # 秒
         

@@ -37,10 +37,10 @@ import csv
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-import sqlite3
 import argparse
 import pandas as pd
-import db  # 导入 db.py 模块以使用其中的数据库路径
+from db import engine
+from sqlalchemy import text
 
 # 配置日志
 logging.basicConfig(
@@ -48,15 +48,12 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# 使用 db.py 中的数据库路径
-# db.py 中已经处理了环境变量和项目根目录的逻辑
-CRYPTO_DB_PATH = db.db_path
-
 class BuySurgeBacktest:
     """买量暴涨策略回测器"""
 
     def __init__(self):
-        self.crypto_conn = sqlite3.connect(CRYPTO_DB_PATH)
+        # PostgreSQL 使用 engine，不需要手动连接
+        pass
 
         # 回测参数
         self.initial_capital = 10000.0  # 初始资金
@@ -91,12 +88,8 @@ class BuySurgeBacktest:
         self.daily_capital = []  # 每日资金记录
 
     def __del__(self):
-        """析构函数，确保数据库连接关闭"""
-        try:
-            if hasattr(self, 'crypto_conn'):
-                self.crypto_conn.close()
-        except:
-            pass
+        """析构函数（PostgreSQL 使用连接池，不需要手动关闭）"""
+        pass
 
     def get_wait_drop_pct(self, buy_surge_ratio: float) -> float:
         """根据买量暴涨倍数获取等待跌幅
@@ -130,24 +123,25 @@ class BuySurgeBacktest:
             
             # 获取信号日之前的最后一个小时K线
             table_name = f'HourlyKline_{symbol}'
-            cursor = self.crypto_conn.cursor()
+            safe_table_name = f'"{table_name}"'
             
-            query = f"""
-                SELECT close
-                FROM "{table_name}"
-                WHERE open_time < {signal_ts}
-                ORDER BY open_time DESC
-                LIMIT 1
-            """
+            with engine.connect() as conn:
+                query = f"""
+                    SELECT close
+                    FROM {safe_table_name}
+                    WHERE open_time < :signal_ts
+                    ORDER BY open_time DESC
+                    LIMIT 1
+                """
+                
+                result = conn.execute(text(query), {"signal_ts": signal_ts})
+                row = result.fetchone()
             
-            cursor.execute(query)
-            result = cursor.fetchone()
-            
-            if not result:
+            if not row:
                 # 如果没有小时数据，默认通过检查
                 return True, 0.0
             
-            prev_1h_close = result[0]
+            prev_1h_close = row[0]
             
             # 计算1小时内的涨幅
             surge_pct = ((signal_close - prev_1h_close) / prev_1h_close * 100)
@@ -225,29 +219,42 @@ class BuySurgeBacktest:
             主动买量暴涨的合约列表
         """
         try:
-            cursor = self.crypto_conn.cursor()
-            
-            # 获取所有交易对
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Kline_%'")
-            tables = cursor.fetchall()
+            # 获取所有交易对（PostgreSQL）
+            # 注意：hm5.py 使用 Kline_ 前缀，需要适配
+            with engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name LIKE :prefix
+                    ORDER BY table_name
+                """), {"prefix": "Kline_%"})
+                tables = result.fetchall()
             
             surge_contracts = []
             
-            for table_name, in tables:
+            for table_row in tables:
+                table_name = table_row[0]
                 symbol = table_name.replace('Kline_', '')
                 
                 if not symbol.endswith('USDT'):
                     continue
                 
                 try:
-                    # 获取当日数据
-                    cursor.execute(f'''
-                        SELECT trade_date, close, open, active_buy_volume
-                        FROM "{table_name}"
-                        WHERE trade_date = ? OR trade_date LIKE ?
-                    ''', (date_str, f'{date_str}%'))
+                    safe_table_name = f'"{table_name}"'
                     
-                    today_result = cursor.fetchone()
+                    # 获取当日数据
+                    with engine.connect() as conn:
+                        result = conn.execute(text(f'''
+                            SELECT trade_date, close, open, active_buy_volume
+                            FROM {safe_table_name}
+                            WHERE trade_date = :date_str OR trade_date LIKE :date_pattern
+                        '''), {
+                            "date_str": date_str,
+                            "date_pattern": f'{date_str}%'
+                        })
+                        today_result = result.fetchone()
+                    
                     if not today_result or not today_result[3]:
                         continue
                     
@@ -257,13 +264,17 @@ class BuySurgeBacktest:
                     yesterday_dt = datetime.strptime(date_str, '%Y-%m-%d') - timedelta(days=1)
                     yesterday_str = yesterday_dt.strftime('%Y-%m-%d')
                     
-                    cursor.execute(f'''
-                        SELECT active_buy_volume
-                        FROM "{table_name}"
-                        WHERE trade_date = ? OR trade_date LIKE ?
-                    ''', (yesterday_str, f'{yesterday_str}%'))
+                    with engine.connect() as conn:
+                        result = conn.execute(text(f'''
+                            SELECT active_buy_volume
+                            FROM {safe_table_name}
+                            WHERE trade_date = :yesterday_str OR trade_date LIKE :yesterday_pattern
+                        '''), {
+                            "yesterday_str": yesterday_str,
+                            "yesterday_pattern": f'{yesterday_str}%'
+                        })
+                        yesterday_result = result.fetchone()
                     
-                    yesterday_result = cursor.fetchone()
                     if not yesterday_result or not yesterday_result[0]:
                         continue
                     
@@ -325,11 +336,16 @@ class BuySurgeBacktest:
             信号列表，包含symbol、信号时间、倍数等
         """
         try:
-            cursor = self.crypto_conn.cursor()
-            
-            # 获取所有交易对
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Kline_%'")
-            daily_tables = cursor.fetchall()
+            # 获取所有交易对（PostgreSQL）
+            with engine.connect() as conn:
+                result = conn.execute(text("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name LIKE :prefix
+                    ORDER BY table_name
+                """), {"prefix": "Kline_%"})
+                daily_tables = result.fetchall()
             
             signals = []
             threshold = self.buy_surge_threshold  # 🔥 某5分钟买量 >= 昨日平均5分钟买量 × 4倍
@@ -337,7 +353,8 @@ class BuySurgeBacktest:
             check_dt = datetime.strptime(check_date, '%Y-%m-%d')
             yesterday_date = (check_dt - timedelta(days=1)).strftime('%Y-%m-%d')
             
-            for table_name, in daily_tables:
+            for table_row in daily_tables:
+                table_name = table_row[0]
                 symbol = table_name.replace('Kline_', '')
                 
                 if not symbol.endswith('USDT'):
@@ -346,13 +363,19 @@ class BuySurgeBacktest:
                 try:
                     # 🚀 步骤1：获取昨日日K线总买量
                     daily_table = f'Kline_{symbol}'
-                    cursor.execute(f'''
-                        SELECT active_buy_volume
-                        FROM "{daily_table}"
-                        WHERE trade_date = ? OR trade_date LIKE ?
-                    ''', (yesterday_date, f'{yesterday_date}%'))
+                    safe_daily_table = f'"{daily_table}"'
                     
-                    yesterday_row = cursor.fetchone()
+                    with engine.connect() as conn:
+                        result = conn.execute(text(f'''
+                            SELECT active_buy_volume
+                            FROM {safe_daily_table}
+                            WHERE trade_date = :yesterday_date OR trade_date LIKE :yesterday_pattern
+                        '''), {
+                            "yesterday_date": yesterday_date,
+                            "yesterday_pattern": f'{yesterday_date}%'
+                        })
+                        yesterday_row = result.fetchone()
+                    
                     if not yesterday_row or not yesterday_row[0]:
                         continue
                     
@@ -362,17 +385,18 @@ class BuySurgeBacktest:
                     
                     # 🚀 步骤2：获取今日所有5分钟K线（只需1次查询！）
                     kline5m_table = f'Kline5m_{symbol}'
-                    cursor.execute(f'''
-                        SELECT trade_date, active_buy_volume, close
-                        FROM "{kline5m_table}"
-                        WHERE trade_date >= ? AND trade_date < ?
-                        ORDER BY trade_date ASC
-                    ''', (
-                        f'{check_date} 00:00:00',
-                        f'{(check_dt + timedelta(days=1)).strftime("%Y-%m-%d")} 00:00:00'
-                    ))
-                    
-                    today_5m_periods = cursor.fetchall()
+                    safe_kline5m_table = f'"{kline5m_table}"'
+                    with engine.connect() as conn:
+                        result = conn.execute(text(f'''
+                            SELECT trade_date, active_buy_volume, close
+                            FROM {safe_kline5m_table}
+                            WHERE trade_date >= :start_time AND trade_date < :end_time
+                            ORDER BY trade_date ASC
+                        '''), {
+                            "start_time": f'{check_date} 00:00:00',
+                            "end_time": f'{(check_dt + timedelta(days=1)).strftime("%Y-%m-%d")} 00:00:00'
+                        })
+                        today_5m_periods = result.fetchall()
                     if not today_5m_periods:
                         continue
                     
@@ -465,13 +489,14 @@ class BuySurgeBacktest:
         """获取本地数据库中指定交易对的小时K线数据"""
         table_name = f'HourlyKline_{symbol}'
         
+        safe_table_name = f'"{table_name}"'
         try:
-            cursor = self.crypto_conn.cursor()
-            cursor.execute(f"SELECT * FROM {table_name} ORDER BY trade_date ASC")
-            columns = [desc[0] for desc in cursor.description]
-            data = cursor.fetchall()
-            df = pd.DataFrame(data, columns=columns)
-            return df
+            with engine.connect() as conn:
+                result = conn.execute(text(f"SELECT * FROM {safe_table_name} ORDER BY trade_date ASC"))
+                data = result.fetchall()
+                columns = result.keys()
+                df = pd.DataFrame(data, columns=columns)
+                return df
         except Exception as e:
             logging.warning(f"获取 {symbol} 小时K线数据失败: {e}")
             return pd.DataFrame()
@@ -479,14 +504,15 @@ class BuySurgeBacktest:
     def get_5m_kline_data(self, symbol: str) -> pd.DataFrame:
         """获取本地数据库中指定交易对的5分钟K线数据"""
         table_name = f'Kline5m_{symbol}'
+        safe_table_name = f'"{table_name}"'
         
         try:
-            cursor = self.crypto_conn.cursor()
-            cursor.execute(f"SELECT * FROM {table_name} ORDER BY trade_date ASC")
-            columns = [desc[0] for desc in cursor.description]
-            data = cursor.fetchall()
-            df = pd.DataFrame(data, columns=columns)
-            return df
+            with engine.connect() as conn:
+                result = conn.execute(text(f"SELECT * FROM {safe_table_name} ORDER BY trade_date ASC"))
+                data = result.fetchall()
+                columns = result.keys()
+                df = pd.DataFrame(data, columns=columns)
+                return df
         except Exception as e:
             logging.warning(f"获取 {symbol} 5分钟K线数据失败: {e}")
             return pd.DataFrame()
@@ -1023,17 +1049,20 @@ class BuySurgeBacktest:
     def get_entry_price(self, symbol: str, date_str: str) -> Optional[float]:
         """获取开盘价作为建仓价格"""
         try:
-            cursor = self.crypto_conn.cursor()
             table_name = f'DailyKline_{symbol}'  # 🔧 修复：使用DailyKline_表（数据更完整）
+            safe_table_name = f'"{table_name}"'
             
-            cursor.execute(f'''
-                SELECT open
-                FROM "{table_name}"
-                WHERE trade_date = ? OR trade_date LIKE ?
-            ''', (date_str, f'{date_str}%'))
-            
-            result = cursor.fetchone()
-            return result[0] if result and result[0] else None
+            with engine.connect() as conn:
+                result = conn.execute(text(f'''
+                    SELECT open
+                    FROM {safe_table_name}
+                    WHERE trade_date = :date_str OR trade_date LIKE :date_pattern
+                '''), {
+                    "date_str": date_str,
+                    "date_pattern": f'{date_str}%'
+                })
+                row = result.fetchone()
+                return row[0] if row and row[0] else None
         
         except Exception as e:
             logging.error(f"获取 {symbol} {date_str} 开盘价失败: {e}")
@@ -1066,17 +1095,20 @@ class BuySurgeBacktest:
             positions_to_check = self.positions.copy()
             for position in positions_to_check:
                 try:
-                    cursor = self.crypto_conn.cursor()
                     table_name = f'DailyKline_{position["symbol"]}'  # 🔧 修复：使用DailyKline_表（数据更完整）
+                    safe_table_name = f'"{table_name}"'
                     
-                    cursor.execute(f'''
-                        SELECT close
-                        FROM "{table_name}"
-                        WHERE trade_date = ? OR trade_date LIKE ?
-                    ''', (date_str, f'{date_str}%'))
-                    
-                    result = cursor.fetchone()
-                    current_price = result[0] if (result and result[0]) else 0.0
+                    with engine.connect() as conn:
+                        result = conn.execute(text(f'''
+                            SELECT close
+                            FROM {safe_table_name}
+                            WHERE trade_date = :date_str OR trade_date LIKE :date_pattern
+                        '''), {
+                            "date_str": date_str,
+                            "date_pattern": f'{date_str}%'
+                        })
+                        row = result.fetchone()
+                    current_price = row[0] if (row and row[0]) else 0.0
                     
                     # 🔧 关键修复：即使日K线数据缺失，也要调用check_exit_conditions
                     # 因为check_exit_conditions内部会使用小时和5分钟数据，不依赖current_price
@@ -1182,20 +1214,23 @@ class BuySurgeBacktest:
         # 最后强制平仓
         for position in self.positions.copy():
             try:
-                cursor = self.crypto_conn.cursor()
                 table_name = f'DailyKline_{position["symbol"]}'  # 🔧 修复：使用DailyKline_表（数据更完整）
+                safe_table_name = f'"{table_name}"'
                 
-                cursor.execute(f'''
-                    SELECT close
-                    FROM "{table_name}"
-                    WHERE trade_date = ? OR trade_date LIKE ?
-                    ORDER BY trade_date DESC
-                    LIMIT 1
-                ''', (end_date, f'{end_date}%'))
-                
-                result = cursor.fetchone()
-                if result and result[0]:
-                    exit_price = result[0]
+                with engine.connect() as conn:
+                    result = conn.execute(text(f'''
+                        SELECT close
+                        FROM {safe_table_name}
+                        WHERE trade_date = :end_date OR trade_date LIKE :end_pattern
+                        ORDER BY trade_date DESC
+                        LIMIT 1
+                    '''), {
+                        "end_date": end_date,
+                        "end_pattern": f'{end_date}%'
+                    })
+                    row = result.fetchone()
+                if row and row[0]:
+                    exit_price = row[0]
                     self.exit_position(position, exit_price, end_date, "force_close")
             
             except Exception as e:

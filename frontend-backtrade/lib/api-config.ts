@@ -34,6 +34,7 @@ export const API_URLS = {
   data: legacyApiUrl || getApiUrl('data'),
   backtest: legacyApiUrl || getApiUrl('backtest'),
   order: legacyApiUrl || getApiUrl('order'),
+  trade: legacyApiUrl || getApiUrl('order'), // 交易服务复用订单服务端口
 }
 
 // 导出默认API URL（用于向后兼容）

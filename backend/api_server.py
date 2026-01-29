@@ -28,6 +28,7 @@ from enum import Enum
 from decimal import Decimal, ROUND_HALF_UP
 import pandas as pd  # pyright: ignore[reportMissingImports]
 import numpy as np  # pyright: ignore[reportMissingImports]
+from sqlalchemy import text
 
 from download_klines import (
     download_kline_data,
@@ -52,8 +53,12 @@ from order import calculate_short_exit_price, calculate_long_exit_price
 # 导入回测函数
 from backtrade import simulate_trading
 
-# 导入回测函数
-from backtrade import simulate_trading
+# 导入分析函数
+from jcfx20260129 import analyze_top_gainer
+
+# 导入数据库相关
+from db import engine
+from services.shared.config import PG_DB, PG_HOST
 
 # 配置日志
 logging.basicConfig(
@@ -524,6 +529,50 @@ async def run_backtest(request: BacktestRequest):
         raise HTTPException(status_code=500, detail=f"回测失败: {str(e)}")
 
 
+@app.get("/api/jcfx-analysis")
+async def get_jcfx_analysis(date: Optional[str] = None):
+    """
+    获取涨幅第一做空分析结果
+    
+    Args:
+        date: 分析日期（可选），格式: YYYY-MM-DD
+    """
+    try:
+        # 运行分析
+        result = analyze_top_gainer(target_date=date)
+        
+        if result is None:
+            raise HTTPException(status_code=404, detail="未找到分析结果或该日期没有数据")
+            
+        # 展平结果以便前端使用
+        flat_result = {
+            "analysis_date": result.get("analysis_date"),
+            "timestamp": result.get("timestamp"),
+            **result.get("signal", {})
+        }
+            
+        # 确保数值可以JSON序列化
+        cleaned_result = {}
+        for k, v in flat_result.items():
+            if isinstance(v, (pd.Timestamp, datetime)):
+                cleaned_result[k] = str(v)
+            elif isinstance(v, (np.integer, np.floating)):
+                cleaned_result[k] = v.item()
+            elif pd.isna(v):
+                cleaned_result[k] = None
+            else:
+                cleaned_result[k] = v
+                
+        return cleaned_result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"分析失败: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"分析失败: {str(e)}")
+
+
 class DataIntegrityRequest(BaseModel):
     """数据完整性检查请求模型"""
     symbol: Optional[str] = Field(default=None, description="交易对符号（如BTCUSDT），如果不指定则检查所有交易对")
@@ -759,6 +808,167 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat()
     }
+
+
+@app.get("/api/database-stats", tags=["系统信息"])
+async def get_database_stats():
+    """获取数据库统计信息"""
+    try:
+        with engine.connect() as conn:
+            # 获取所有表名
+            result = conn.execute(text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """))
+            all_tables = [row[0] for row in result.fetchall()]
+            
+            # 筛选K线表（以K开头）
+            kline_tables = [t for t in all_tables if t.startswith('K')]
+            
+            # 按 interval 分类统计
+            interval_stats = {}
+            total_tables = 0
+            total_rows = 0
+            
+            # 常见的 interval 前缀
+            intervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']
+            
+            for interval in intervals:
+                prefix = f'K{interval}'
+                interval_tables = [t for t in kline_tables if t.startswith(prefix)]
+                
+                if interval_tables:
+                    table_rows = []
+                    interval_total_rows = 0
+                    latest_dates = []  # 存储每个表的最新日期
+                    
+                    # 获取每个表的行数（限制查询数量，避免太慢）
+                    for table in interval_tables[:100]:  # 最多查询100个表
+                        try:
+                            safe_table_name = f'"{table}"'
+                            count_result = conn.execute(text(f'SELECT COUNT(*) FROM {safe_table_name}'))
+                            row_count = count_result.fetchone()[0]
+                            
+                            # 获取该表的最新日期
+                            latest_date = None
+                            try:
+                                date_result = conn.execute(text(f'SELECT MAX(trade_date) FROM {safe_table_name}'))
+                                latest_date_row = date_result.fetchone()
+                                if latest_date_row and latest_date_row[0]:
+                                    latest_date = str(latest_date_row[0])
+                                    if latest_date:
+                                        latest_dates.append(latest_date)
+                            except Exception as e:
+                                logging.debug(f"获取表 {table} 最新日期失败: {e}")
+                            
+                            table_rows.append({
+                                'table_name': table,
+                                'row_count': row_count
+                            })
+                            interval_total_rows += row_count
+                        except Exception as e:
+                            logging.warning(f"获取表 {table} 行数失败: {e}")
+                            table_rows.append({
+                                'table_name': table,
+                                'row_count': 0
+                            })
+                    
+                    # 如果有超过100个表，估算剩余表的行数
+                    if len(interval_tables) > 100:
+                        # 计算平均行数
+                        if len(table_rows) > 0:
+                            avg_rows = interval_total_rows / len(table_rows)
+                            estimated_total = interval_total_rows + (len(interval_tables) - 100) * avg_rows
+                        else:
+                            estimated_total = interval_total_rows
+                    else:
+                        estimated_total = interval_total_rows
+                    
+                    # 计算所有表中最新的日期
+                    latest_date_overall = None
+                    if latest_dates:
+                        # 将日期字符串转换为datetime进行比较
+                        try:
+                            parsed_dates = []
+                            for date_str in latest_dates:
+                                if not date_str:
+                                    continue
+                                try:
+                                    # 处理PostgreSQL返回的datetime对象或字符串
+                                    if isinstance(date_str, datetime):
+                                        parsed_dates.append(date_str)
+                                    elif isinstance(date_str, str):
+                                        # 尝试解析不同的日期格式
+                                        if ' ' in date_str:
+                                            parsed_dates.append(datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S'))
+                                        else:
+                                            parsed_dates.append(datetime.strptime(date_str, '%Y-%m-%d'))
+                                except Exception as parse_err:
+                                    logging.debug(f"解析日期 {date_str} 失败: {parse_err}")
+                                    pass
+                            
+                            if parsed_dates:
+                                max_date = max(parsed_dates)
+                                # 格式化日期，如果有时间部分则显示完整时间，否则只显示日期
+                                if max_date.hour == 0 and max_date.minute == 0 and max_date.second == 0:
+                                    latest_date_overall = max_date.strftime('%Y-%m-%d')
+                                else:
+                                    latest_date_overall = max_date.strftime('%Y-%m-%d %H:%M:%S')
+                        except Exception as e:
+                            logging.debug(f"解析最新日期失败: {e}")
+                            # 如果解析失败，使用字符串比较（仅作为后备方案）
+                            if latest_dates:
+                                latest_date_overall = max([str(d) for d in latest_dates if d])
+                    
+                    interval_stats[interval] = {
+                        'table_count': len(interval_tables),
+                        'total_rows': int(estimated_total),
+                        'sampled_tables': len(table_rows),
+                        'latest_date': latest_date_overall,
+                        'tables': table_rows[:20]  # 只返回前20个表的详细信息
+                    }
+                    
+                    total_tables += len(interval_tables)
+                    total_rows += int(estimated_total)
+            
+            # 获取其他表（非K线表）
+            other_tables = [t for t in all_tables if not t.startswith('K')]
+            other_table_info = []
+            other_total_rows = 0
+            
+            for table in other_tables[:50]:  # 最多查询50个其他表
+                try:
+                    safe_table_name = f'"{table}"'
+                    count_result = conn.execute(text(f'SELECT COUNT(*) FROM {safe_table_name}'))
+                    row_count = count_result.fetchone()[0]
+                    other_table_info.append({
+                        'table_name': table,
+                        'row_count': row_count
+                    })
+                    other_total_rows += row_count
+                except Exception as e:
+                    logging.warning(f"获取表 {table} 行数失败: {e}")
+            
+            return {
+                "total_tables": total_tables + len(other_tables),
+                "total_rows": total_rows + other_total_rows,
+                "kline_tables": total_tables,
+                "kline_rows": total_rows,
+                "by_interval": interval_stats,
+                "other_tables": {
+                    "count": len(other_tables),
+                    "total_rows": other_total_rows,
+                    "tables": other_table_info
+                },
+                "database_name": PG_DB,
+                "host": PG_HOST
+            }
+    except Exception as e:
+        logging.error(f"获取数据库统计信息失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,74 @@
 import { useState } from 'react'
 import { API_URLS } from '../lib/api-config'
 
+interface SignalRecord {
+  symbol: string
+  signal_date: string
+  signal_time: string
+  earliest_entry_time: string
+  signal_price: number
+  buy_surge_ratio: number
+  target_drop_pct: number
+  target_price: number
+  timeout_time: string
+  status: string
+  entry_time: string
+  entry_price: string
+  note: string
+  account_ratio?: number | null
+}
+
+interface DetailedStatistics {
+  take_profit_stats?: {
+    total_closed: number
+    high_tp?: {
+      count: number
+      percentage: number
+      triggered_count: number
+      success_count: number
+      success_rate: number
+      total_profit: number
+      avg_profit: number
+    }
+    normal_tp?: {
+      count: number
+      percentage: number
+      triggered_count: number
+      total_profit: number
+      avg_profit: number
+    }
+    other_exits?: {
+      count: number
+      percentage: number
+    }
+  }
+  stop_loss?: {
+    count: number
+    percentage: number
+    total_loss: number
+  }
+  stop_loss_trader?: {
+    count: number
+    percentage: number
+    total_loss: number
+    avg_loss: number
+  }
+  max_hold_timeout?: {
+    count: number
+    percentage: number
+    positive_count: number
+    negative_count: number
+    total_pnl: number
+  }
+  force_close?: {
+    count: number
+    percentage: number
+    positive_count: number
+    negative_count: number
+    total_pnl: number
+  }
+}
+
 interface BacktestResult {
   initial_capital: number
   final_capital: number
@@ -17,10 +85,12 @@ interface BacktestResult {
   strategy?: string
   csv_filename?: string
   max_drawdown?: number
+  signal_records?: SignalRecord[]  // 🆕 信号记录
+  detailed_statistics?: DetailedStatistics  // 🆕 详细统计信息
 }
 
 export default function BacktestForm() {
-  const [backtestType, setBacktestType] = useState<'standard' | 'smartmoney' | 'buy-surge' | 'backtrade4'>('standard')
+  const [backtestType, setBacktestType] = useState<'standard' | 'smartmoney' | 'buy-surge-hourly' | 'buy-surge-v2' | 'buy-surge-v3' | 'backtrade4'>('standard')
   const [startDate, setStartDate] = useState('2025-11-01')
   const [endDate, setEndDate] = useState('2026-01-03')
   const [initialCapital, setInitialCapital] = useState('10000')
@@ -42,17 +112,53 @@ export default function BacktestForm() {
   const [smartMoneyPositionSizeRatio, setSmartMoneyPositionSizeRatio] = useState('10')
   const [smartMoneyMinPctChg, setSmartMoneyMinPctChg] = useState('25')
   const [showSmartMoneyAdvanced, setShowSmartMoneyAdvanced] = useState(false)
-  // 买量暴涨回测参数
-  const [buySurgeInitialCapital, setBuySurgeInitialCapital] = useState('10000')
-  const [buySurgeLeverage, setBuySurgeLeverage] = useState('4')
-  const [buySurgePositionSizeRatio, setBuySurgePositionSizeRatio] = useState('5')
-  const [buySurgeThreshold, setBuySurgeThreshold] = useState('20.0')
-  const [buySurgeTakeProfitPct, setBuySurgeTakeProfitPct] = useState('20')
-  const [buySurgeAddPositionTriggerPct, setBuySurgeAddPositionTriggerPct] = useState('-18')
-  const [buySurgeStopLossPct, setBuySurgeStopLossPct] = useState('-18')
-  const [buySurgeMaxHoldHours, setBuySurgeMaxHoldHours] = useState('72')
-  const [buySurgeWaitTimeoutHours, setBuySurgeWaitTimeoutHours] = useState('48')
-  const [showBuySurgeAdvanced, setShowBuySurgeAdvanced] = useState(false)
+  // 买量暴涨回测参数（小时线优化版）
+  const [buySurgeHourlyInitialCapital, setBuySurgeHourlyInitialCapital] = useState('10000')
+  const [buySurgeHourlyLeverage, setBuySurgeHourlyLeverage] = useState('4')
+  const [buySurgeHourlyPositionSizeRatio, setBuySurgeHourlyPositionSizeRatio] = useState('5')
+  const [buySurgeHourlyBuySurgeThreshold, setBuySurgeHourlyBuySurgeThreshold] = useState('2.0')
+  const [buySurgeHourlyBuySurgeMax, setBuySurgeHourlyBuySurgeMax] = useState('3.0')
+  const [buySurgeHourlyTakeProfitPct, setBuySurgeHourlyTakeProfitPct] = useState('33')
+  const [buySurgeHourlyAddPositionTriggerPct, setBuySurgeHourlyAddPositionTriggerPct] = useState('-18')
+  const [buySurgeHourlyStopLossPct, setBuySurgeHourlyStopLossPct] = useState('-18')
+  const [buySurgeHourlyMaxHoldHours, setBuySurgeHourlyMaxHoldHours] = useState('72')
+  const [buySurgeHourlyWaitTimeoutHours, setBuySurgeHourlyWaitTimeoutHours] = useState('48')
+  const [buySurgeHourlyEnableTraderFilter, setBuySurgeHourlyEnableTraderFilter] = useState(true)
+  const [buySurgeHourlyMinAccountRatio, setBuySurgeHourlyMinAccountRatio] = useState('0.70')
+  const [showBuySurgeHourlyAdvanced, setShowBuySurgeHourlyAdvanced] = useState(false)
+
+  // 买量暴涨策略 (V2 - PostgreSQL版) 回测参数
+  const [buySurgeV2InitialCapital, setBuySurgeV2InitialCapital] = useState('10000')
+  const [buySurgeV2Leverage, setBuySurgeV2Leverage] = useState('4')
+  const [buySurgeV2PositionSizeRatio, setBuySurgeV2PositionSizeRatio] = useState('1')
+  const [buySurgeV2BuySurgeThreshold, setBuySurgeV2BuySurgeThreshold] = useState('2.0')
+  const [buySurgeV2BuySurgeMax, setBuySurgeV2BuySurgeMax] = useState('10.0')
+  const [buySurgeV2TakeProfitPct, setBuySurgeV2TakeProfitPct] = useState('33')
+  const [buySurgeV2AddPositionTriggerPct, setBuySurgeV2AddPositionTriggerPct] = useState('-18')
+  const [buySurgeV2StopLossPct, setBuySurgeV2StopLossPct] = useState('-18')
+  const [buySurgeV2MaxHoldHours, setBuySurgeV2MaxHoldHours] = useState('72')
+  const [buySurgeV2WaitTimeoutHours, setBuySurgeV2WaitTimeoutHours] = useState('37')
+  const [buySurgeV2EnableTraderFilter, setBuySurgeV2EnableTraderFilter] = useState(true)
+  const [buySurgeV2MinAccountRatio, setBuySurgeV2MinAccountRatio] = useState('0.84')
+  const [showBuySurgeV2Advanced, setShowBuySurgeV2Advanced] = useState(false)
+
+  // 买量暴涨策略 (V3 - 最新版) 回测参数
+  const [buySurgeV3InitialCapital, setBuySurgeV3InitialCapital] = useState('10000')
+  const [buySurgeV3Leverage, setBuySurgeV3Leverage] = useState('4')
+  const [buySurgeV3PositionSizeRatio, setBuySurgeV3PositionSizeRatio] = useState('6')
+  const [buySurgeV3BuySurgeThreshold, setBuySurgeV3BuySurgeThreshold] = useState('2.2')
+  const [buySurgeV3BuySurgeMax, setBuySurgeV3BuySurgeMax] = useState('3.0')
+  const [buySurgeV3TakeProfitPct, setBuySurgeV3TakeProfitPct] = useState('33')
+  const [buySurgeV3AddPositionTriggerPct, setBuySurgeV3AddPositionTriggerPct] = useState('-18')
+  const [buySurgeV3StopLossPct, setBuySurgeV3StopLossPct] = useState('-18')
+  const [buySurgeV3MaxHoldHours, setBuySurgeV3MaxHoldHours] = useState('72')
+  const [buySurgeV3WaitTimeoutHours, setBuySurgeV3WaitTimeoutHours] = useState('37')
+  const [buySurgeV3MaxDailyPositions, setBuySurgeV3MaxDailyPositions] = useState('6')
+  const [buySurgeV3EnableTraderFilter, setBuySurgeV3EnableTraderFilter] = useState(false)
+  const [buySurgeV3MinAccountRatio, setBuySurgeV3MinAccountRatio] = useState('0.84')
+  const [buySurgeV3AccountRatioStopThreshold, setBuySurgeV3AccountRatioStopThreshold] = useState('-0.10')
+  const [showBuySurgeV3Advanced, setShowBuySurgeV3Advanced] = useState(false)
+
   // Backtrade4回测参数
   const [backtrade4InitialCapital, setBacktrade4InitialCapital] = useState('10000')
   const [backtrade4PositionSizeRatio, setBacktrade4PositionSizeRatio] = useState('10')
@@ -81,18 +187,20 @@ export default function BacktestForm() {
       return
     }
 
-    // 买量暴涨回测
-    if (backtestType === 'buy-surge') {
+    // 买量暴涨回测（小时线优化版）
+    if (backtestType === 'buy-surge-hourly') {
       // 验证参数
-      const initialCapitalNum = parseFloat(buySurgeInitialCapital)
-      const leverageNum = parseFloat(buySurgeLeverage)
-      const positionSizeRatioNum = parseFloat(buySurgePositionSizeRatio)
-      const thresholdNum = parseFloat(buySurgeThreshold)
-      const takeProfitPctNum = parseFloat(buySurgeTakeProfitPct)
-      const addPositionTriggerPctNum = parseFloat(buySurgeAddPositionTriggerPct)
-      const stopLossPctNum = parseFloat(buySurgeStopLossPct)
-      const maxHoldHoursNum = parseFloat(buySurgeMaxHoldHours)
-      const waitTimeoutHoursNum = parseFloat(buySurgeWaitTimeoutHours)
+      const initialCapitalNum = parseFloat(buySurgeHourlyInitialCapital)
+      const leverageNum = parseFloat(buySurgeHourlyLeverage)
+      const positionSizeRatioNum = parseFloat(buySurgeHourlyPositionSizeRatio)
+      const buySurgeThresholdNum = parseFloat(buySurgeHourlyBuySurgeThreshold)
+      const buySurgeMaxNum = parseFloat(buySurgeHourlyBuySurgeMax)
+      const takeProfitPctNum = parseFloat(buySurgeHourlyTakeProfitPct)
+      const addPositionTriggerPctNum = parseFloat(buySurgeHourlyAddPositionTriggerPct)
+      const stopLossPctNum = parseFloat(buySurgeHourlyStopLossPct)
+      const maxHoldHoursNum = parseFloat(buySurgeHourlyMaxHoldHours)
+      const waitTimeoutHoursNum = parseFloat(buySurgeHourlyWaitTimeoutHours)
+      const minAccountRatioNum = parseFloat(buySurgeHourlyMinAccountRatio)
 
       if (isNaN(initialCapitalNum) || initialCapitalNum <= 0) {
         setError('初始资金必须大于0')
@@ -106,20 +214,24 @@ export default function BacktestForm() {
         setError('建仓比例必须在0-100之间')
         return
       }
-      if (isNaN(thresholdNum) || thresholdNum <= 0) {
+      if (isNaN(buySurgeThresholdNum) || buySurgeThresholdNum <= 0) {
         setError('买量暴涨阈值必须大于0')
         return
       }
-      if (isNaN(takeProfitPctNum) || takeProfitPctNum < 0 || takeProfitPctNum > 100) {
+      if (isNaN(buySurgeMaxNum) || buySurgeMaxNum <= buySurgeThresholdNum) {
+        setError('买量暴涨倍数上限必须大于阈值')
+        return
+      }
+      if (isNaN(takeProfitPctNum) || takeProfitPctNum <= 0 || takeProfitPctNum > 100) {
         setError('止盈比例必须在0-100之间')
         return
       }
-      if (isNaN(addPositionTriggerPctNum) || addPositionTriggerPctNum > 0) {
-        setError('补仓触发比例必须是负数')
+      if (isNaN(addPositionTriggerPctNum) || addPositionTriggerPctNum >= 0) {
+        setError('补仓触发比例必须小于0')
         return
       }
-      if (isNaN(stopLossPctNum) || stopLossPctNum > 0) {
-        setError('止损比例必须是负数')
+      if (isNaN(stopLossPctNum) || stopLossPctNum >= 0) {
+        setError('止损比例必须小于0')
         return
       }
       if (isNaN(maxHoldHoursNum) || maxHoldHoursNum <= 0) {
@@ -130,10 +242,14 @@ export default function BacktestForm() {
         setError('等待超时时间必须大于0')
         return
       }
+      if (isNaN(minAccountRatioNum) || minAccountRatioNum < 0 || minAccountRatioNum > 1) {
+        setError('最小账户多空比必须在0-1之间')
+        return
+      }
 
       setLoading(true)
       try {
-        const response = await fetch(`${API_URLS.backtest}/api/backtest/buy-surge`, {
+        const response = await fetch(`${API_URLS.backtest}/api/backtest/buy-surge-hourly`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -144,12 +260,15 @@ export default function BacktestForm() {
             initial_capital: initialCapitalNum,
             leverage: leverageNum,
             position_size_ratio: positionSizeRatioNum / 100, // 转换为小数
-            buy_surge_threshold: thresholdNum,
+            buy_surge_threshold: buySurgeThresholdNum,
+            buy_surge_max: buySurgeMaxNum,
             take_profit_pct: takeProfitPctNum / 100, // 转换为小数
             add_position_trigger_pct: addPositionTriggerPctNum / 100, // 转换为小数
             stop_loss_pct: stopLossPctNum / 100, // 转换为小数
             max_hold_hours: maxHoldHoursNum,
             wait_timeout_hours: waitTimeoutHoursNum,
+            enable_trader_filter: buySurgeHourlyEnableTraderFilter,
+            min_account_ratio: minAccountRatioNum,
           }),
         })
 
@@ -159,18 +278,274 @@ export default function BacktestForm() {
         }
 
         const data = await response.json()
-        // 转换返回数据格式以匹配BacktestResult接口
+        console.log('买量暴涨（小时线）回测结果:', data) // 调试日志
+        
+        // 检查数据结构
+        if (!data.statistics) {
+          console.error('回测结果缺少 statistics 字段:', data)
+          throw new Error('回测结果格式错误：缺少 statistics 字段')
+        }
+        
+        const resultData = {
+          initial_capital: data.statistics.initial_capital,
+          final_capital: data.statistics.final_capital,
+          total_profit_loss: data.statistics.final_capital - data.statistics.initial_capital,
+          total_return_rate: data.statistics.total_return,
+          total_trades: data.statistics.total_trades,
+          win_trades: data.statistics.winning_trades,
+          loss_trades: data.statistics.losing_trades,
+          win_rate: data.statistics.win_rate,
+          max_drawdown: data.statistics.max_drawdown,
+          strategy: data.strategy,
+          csv_filename: data.csv_filename || undefined,
+          signal_records: data.signal_records || [],  // 🆕 保存信号记录
+          detailed_statistics: data.detailed_statistics || undefined  // 🆕 保存详细统计信息
+        }
+        
+        console.log('设置回测结果:', resultData) // 调试日志
+        setResult(resultData)
+      } catch (err) {
+        console.error('买量暴涨（小时线）回测错误:', err) // 调试日志
+        const errorMessage = err instanceof Error ? err.message : '回测失败，请稍后重试'
+        setError(errorMessage)
+        setResult(null) // 确保错误时清除结果
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+
+    // 买量暴涨策略 (V2 - PostgreSQL版) 回测
+    if (backtestType === 'buy-surge-v2') {
+      // 验证参数
+      const initialCapitalNum = parseFloat(buySurgeV2InitialCapital)
+      const leverageNum = parseFloat(buySurgeV2Leverage)
+      const positionSizeRatioNum = parseFloat(buySurgeV2PositionSizeRatio)
+      const buySurgeThresholdNum = parseFloat(buySurgeV2BuySurgeThreshold)
+      const buySurgeMaxNum = parseFloat(buySurgeV2BuySurgeMax)
+      const takeProfitPctNum = parseFloat(buySurgeV2TakeProfitPct)
+      const addPositionTriggerPctNum = parseFloat(buySurgeV2AddPositionTriggerPct)
+      const stopLossPctNum = parseFloat(buySurgeV2StopLossPct)
+      const maxHoldHoursNum = parseFloat(buySurgeV2MaxHoldHours)
+      const waitTimeoutHoursNum = parseFloat(buySurgeV2WaitTimeoutHours)
+      const minAccountRatioNum = parseFloat(buySurgeV2MinAccountRatio)
+
+      if (isNaN(initialCapitalNum) || initialCapitalNum <= 0) {
+        setError('初始资金必须大于0')
+        return
+      }
+      if (isNaN(leverageNum) || leverageNum <= 0) {
+        setError('杠杆倍数必须大于0')
+        return
+      }
+      if (isNaN(positionSizeRatioNum) || positionSizeRatioNum <= 0 || positionSizeRatioNum > 100) {
+        setError('建仓比例必须在0-100之间')
+        return
+      }
+      if (isNaN(buySurgeThresholdNum) || buySurgeThresholdNum <= 0) {
+        setError('买量暴涨阈值必须大于0')
+        return
+      }
+      if (isNaN(buySurgeMaxNum) || buySurgeMaxNum <= buySurgeThresholdNum) {
+        setError('买量暴涨倍数上限必须大于阈值')
+        return
+      }
+      if (isNaN(takeProfitPctNum) || takeProfitPctNum <= 0 || takeProfitPctNum > 100) {
+        setError('止盈比例必须在0-100之间')
+        return
+      }
+      if (isNaN(addPositionTriggerPctNum) || addPositionTriggerPctNum >= 0) {
+        setError('补仓触发比例必须小于0')
+        return
+      }
+      if (isNaN(stopLossPctNum) || stopLossPctNum >= 0) {
+        setError('止损比例必须小于0')
+        return
+      }
+      if (isNaN(maxHoldHoursNum) || maxHoldHoursNum <= 0) {
+        setError('最大持仓小时数必须大于0')
+        return
+      }
+      if (isNaN(waitTimeoutHoursNum) || waitTimeoutHoursNum <= 0) {
+        setError('等待超时时间必须大于0')
+        return
+      }
+      if (isNaN(minAccountRatioNum) || minAccountRatioNum < 0 || minAccountRatioNum > 1) {
+        setError('最小账户多空比必须在0-1之间')
+        return
+      }
+
+      setLoading(true)
+      try {
+        const response = await fetch(`${API_URLS.backtest}/api/backtest/buy-surge-v2`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            start_date: startDate,
+            end_date: endDate,
+            initial_capital: initialCapitalNum,
+            leverage: leverageNum,
+            position_size_ratio: positionSizeRatioNum / 100, // 转换为小数
+            buy_surge_threshold: buySurgeThresholdNum,
+            buy_surge_max: buySurgeMaxNum,
+            take_profit_pct: takeProfitPctNum / 100, // 转换为小数
+            add_position_trigger_pct: addPositionTriggerPctNum / 100, // 转换为小数
+            stop_loss_pct: stopLossPctNum / 100, // 转换为小数
+            max_hold_hours: maxHoldHoursNum,
+            wait_timeout_hours: waitTimeoutHoursNum,
+            enable_trader_filter: buySurgeV2EnableTraderFilter,
+            min_account_ratio: minAccountRatioNum,
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.detail || '回测失败')
+        }
+
+        const data = await response.json()
         setResult({
-          initial_capital: data.statistics?.initial_capital || data.initial_capital || 0,
-          final_capital: data.statistics?.final_capital || data.final_capital || 0,
-          total_profit_loss: (data.statistics?.final_capital || 0) - (data.statistics?.initial_capital || 0),
-          total_return_rate: data.statistics?.total_return || data.total_return_rate || 0,
-          total_trades: data.statistics?.total_trades || data.total_trades || 0,
-          win_trades: data.statistics?.winning_trades || data.win_trades || 0,
-          loss_trades: data.statistics?.losing_trades || data.loss_trades || 0,
-          win_rate: data.statistics?.win_rate || data.win_rate || 0,
-          max_drawdown: data.statistics?.max_drawdown,
-          strategy: data.strategy || '买量暴涨策略',
+          initial_capital: data.statistics.initial_capital,
+          final_capital: data.statistics.final_capital,
+          total_profit_loss: data.statistics.final_capital - data.statistics.initial_capital,
+          total_return_rate: data.statistics.total_return,
+          total_trades: data.statistics.total_trades,
+          win_trades: data.statistics.winning_trades,
+          loss_trades: data.statistics.losing_trades,
+          win_rate: data.statistics.win_rate,
+          max_drawdown: data.statistics.max_drawdown,
+          strategy: data.strategy,
+          csv_filename: data.csv_filename || undefined,
+          signal_records: data.signal_records || [],
+          detailed_statistics: data.detailed_statistics || undefined
+        })
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '回测失败，请稍后重试')
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+
+    // 买量暴涨策略 (V3 - 最新版) 回测
+    if (backtestType === 'buy-surge-v3') {
+      // 验证参数
+      const initialCapitalNum = parseFloat(buySurgeV3InitialCapital)
+      const leverageNum = parseFloat(buySurgeV3Leverage)
+      const positionSizeRatioNum = parseFloat(buySurgeV3PositionSizeRatio)
+      const buySurgeThresholdNum = parseFloat(buySurgeV3BuySurgeThreshold)
+      const buySurgeMaxNum = parseFloat(buySurgeV3BuySurgeMax)
+      const takeProfitPctNum = parseFloat(buySurgeV3TakeProfitPct)
+      const addPositionTriggerPctNum = parseFloat(buySurgeV3AddPositionTriggerPct)
+      const stopLossPctNum = parseFloat(buySurgeV3StopLossPct)
+      const maxHoldHoursNum = parseFloat(buySurgeV3MaxHoldHours)
+      const waitTimeoutHoursNum = parseFloat(buySurgeV3WaitTimeoutHours)
+      const maxDailyPositionsNum = parseFloat(buySurgeV3MaxDailyPositions)
+      const minAccountRatioNum = parseFloat(buySurgeV3MinAccountRatio)
+      const accountRatioStopThresholdNum = parseFloat(buySurgeV3AccountRatioStopThreshold)
+
+      if (isNaN(initialCapitalNum) || initialCapitalNum <= 0) {
+        setError('初始资金必须大于0')
+        return
+      }
+      if (isNaN(leverageNum) || leverageNum <= 0) {
+        setError('杠杆倍数必须大于0')
+        return
+      }
+      if (isNaN(positionSizeRatioNum) || positionSizeRatioNum <= 0 || positionSizeRatioNum > 100) {
+        setError('建仓比例必须在0-100之间')
+        return
+      }
+      if (isNaN(buySurgeThresholdNum) || buySurgeThresholdNum <= 0) {
+        setError('买量暴涨阈值必须大于0')
+        return
+      }
+      if (isNaN(buySurgeMaxNum) || buySurgeMaxNum <= buySurgeThresholdNum) {
+        setError('买量暴涨倍数上限必须大于阈值')
+        return
+      }
+      if (isNaN(takeProfitPctNum) || takeProfitPctNum <= 0 || takeProfitPctNum > 100) {
+        setError('止盈比例必须在0-100之间')
+        return
+      }
+      if (isNaN(addPositionTriggerPctNum) || addPositionTriggerPctNum >= 0) {
+        setError('补仓触发比例必须小于0')
+        return
+      }
+      if (isNaN(stopLossPctNum) || stopLossPctNum >= 0) {
+        setError('止损比例必须小于0')
+        return
+      }
+      if (isNaN(maxHoldHoursNum) || maxHoldHoursNum <= 0) {
+        setError('最大持仓小时数必须大于0')
+        return
+      }
+      if (isNaN(waitTimeoutHoursNum) || waitTimeoutHoursNum <= 0) {
+        setError('等待超时时间必须大于0')
+        return
+      }
+      if (isNaN(maxDailyPositionsNum) || maxDailyPositionsNum <= 0) {
+        setError('并发持仓上限必须大于0')
+        return
+      }
+      if (isNaN(minAccountRatioNum) || minAccountRatioNum < 0 || minAccountRatioNum > 1) {
+        setError('最小账户多空比必须在0-1之间')
+        return
+      }
+      if (isNaN(accountRatioStopThresholdNum) || accountRatioStopThresholdNum < -10000 || accountRatioStopThresholdNum > 1) {
+        setError('账户多空比止损阈值必须在合理范围内')
+        return
+      }
+
+      setLoading(true)
+      try {
+        const response = await fetch(`${API_URLS.backtest}/api/backtest/buy-surge-v3`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            start_date: startDate,
+            end_date: endDate,
+            initial_capital: initialCapitalNum,
+            leverage: leverageNum,
+            position_size_ratio: positionSizeRatioNum / 100, // 转换为小数
+            buy_surge_threshold: buySurgeThresholdNum,
+            buy_surge_max: buySurgeMaxNum,
+            take_profit_pct: takeProfitPctNum / 100, // 转换为小数
+            add_position_trigger_pct: addPositionTriggerPctNum / 100, // 转换为小数
+            stop_loss_pct: stopLossPctNum / 100, // 转换为小数
+            max_hold_hours: maxHoldHoursNum,
+            wait_timeout_hours: waitTimeoutHoursNum,
+            max_daily_positions: maxDailyPositionsNum,
+            enable_trader_filter: buySurgeV3EnableTraderFilter,
+            min_account_ratio: minAccountRatioNum,
+            account_ratio_stop_threshold: accountRatioStopThresholdNum,
+          }),
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.detail || '回测失败')
+        }
+
+        const data = await response.json()
+        setResult({
+          initial_capital: data.statistics.initial_capital,
+          final_capital: data.statistics.final_capital,
+          total_profit_loss: data.statistics.final_capital - data.statistics.initial_capital,
+          total_return_rate: data.statistics.total_return,
+          total_trades: data.statistics.total_trades,
+          win_trades: data.statistics.winning_trades,
+          loss_trades: data.statistics.losing_trades,
+          win_rate: data.statistics.win_rate,
+          max_drawdown: data.statistics.max_drawdown,
+          strategy: data.strategy,
+          csv_filename: data.csv_filename || undefined,
+          signal_records: data.signal_records || [],
+          detailed_statistics: data.detailed_statistics || undefined
         })
       } catch (err) {
         setError(err instanceof Error ? err.message : '回测失败，请稍后重试')
@@ -393,12 +768,24 @@ export default function BacktestForm() {
       {/* 回测类型标签页 */}
       <div className="flex space-x-4 border-b border-gray-700">
         <button
-          onClick={() => {
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (loading) {
+              return // 回测进行中，禁止切换标签
+            }
             setBacktestType('standard')
-            setResult(null)
-            setError('')
+            // 只有在切换标签时才清除结果，回测过程中不清除
+            if (backtestType !== 'standard') {
+              setResult(null)
+              setError('')
+            }
           }}
+          disabled={loading}
           className={`px-6 py-3 font-medium transition-colors ${
+            loading ? 'opacity-50 cursor-not-allowed' : ''
+          } ${
             backtestType === 'standard'
               ? 'text-blue-400 border-b-2 border-blue-400'
               : 'text-gray-400 hover:text-gray-300'
@@ -407,12 +794,23 @@ export default function BacktestForm() {
           标准回测
         </button>
         <button
-          onClick={() => {
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (loading) {
+              return // 回测进行中，禁止切换标签
+            }
             setBacktestType('smartmoney')
-            setResult(null)
-            setError('')
+            if (backtestType !== 'smartmoney') {
+              setResult(null)
+              setError('')
+            }
           }}
+          disabled={loading}
           className={`px-6 py-3 font-medium transition-colors ${
+            loading ? 'opacity-50 cursor-not-allowed' : ''
+          } ${
             backtestType === 'smartmoney'
               ? 'text-purple-400 border-b-2 border-purple-400'
               : 'text-gray-400 hover:text-gray-300'
@@ -421,26 +819,98 @@ export default function BacktestForm() {
           聪明钱回测
         </button>
         <button
-          onClick={() => {
-            setBacktestType('buy-surge')
-            setResult(null)
-            setError('')
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (loading) {
+              return // 回测进行中，禁止切换标签
+            }
+            setBacktestType('buy-surge-hourly')
+            if (backtestType !== 'buy-surge-hourly') {
+              setResult(null)
+              setError('')
+            }
           }}
+          disabled={loading}
           className={`px-6 py-3 font-medium transition-colors ${
-            backtestType === 'buy-surge'
+            loading ? 'opacity-50 cursor-not-allowed' : ''
+          } ${
+            backtestType === 'buy-surge-hourly'
               ? 'text-orange-400 border-b-2 border-orange-400'
               : 'text-gray-400 hover:text-gray-300'
           }`}
         >
-          买量暴涨回测
+          买量暴涨（旧）
         </button>
         <button
-          onClick={() => {
-            setBacktestType('backtrade4')
-            setResult(null)
-            setError('')
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (loading) {
+              return // 回测进行中，禁止切换标签
+            }
+            setBacktestType('buy-surge-v2')
+            if (backtestType !== 'buy-surge-v2') {
+              setResult(null)
+              setError('')
+            }
           }}
+          disabled={loading}
           className={`px-6 py-3 font-medium transition-colors ${
+            loading ? 'opacity-50 cursor-not-allowed' : ''
+          } ${
+            backtestType === 'buy-surge-v2'
+              ? 'text-yellow-400 border-b-2 border-yellow-400'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          买量暴涨 (V2)
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (loading) {
+              return // 回测进行中，禁止切换标签
+            }
+            setBacktestType('buy-surge-v3')
+            if (backtestType !== 'buy-surge-v3') {
+              setResult(null)
+              setError('')
+            }
+          }}
+          disabled={loading}
+          className={`px-6 py-3 font-medium transition-colors ${
+            loading ? 'opacity-50 cursor-not-allowed' : ''
+          } ${
+            backtestType === 'buy-surge-v3'
+              ? 'text-red-400 border-b-2 border-red-400'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          买量暴涨 (V3)
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            if (loading) {
+              return // 回测进行中，禁止切换标签
+            }
+            setBacktestType('backtrade4')
+            if (backtestType !== 'backtrade4') {
+              setResult(null)
+              setError('')
+            }
+          }}
+          disabled={loading}
+          className={`px-6 py-3 font-medium transition-colors ${
+            loading ? 'opacity-50 cursor-not-allowed' : ''
+          } ${
             backtestType === 'backtrade4'
               ? 'text-green-400 border-b-2 border-green-400'
               : 'text-gray-400 hover:text-gray-300'
@@ -478,120 +948,131 @@ export default function BacktestForm() {
           </div>
         </div>
 
-        {/* 买量暴涨策略参数设置 */}
-        {backtestType === 'buy-surge' && (
-          <div className="bg-orange-900/30 border border-orange-700 rounded-lg p-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-orange-300">买量暴涨策略参数</h3>
+        {/* 买量暴涨策略（小时线优化版）参数 */}
+        {backtestType === 'buy-surge-hourly' && (
+          <div className="bg-orange-900/30 rounded-lg p-4 border border-orange-700/50">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-orange-200">策略参数</h3>
               <button
-                onClick={() => setShowBuySurgeAdvanced(!showBuySurgeAdvanced)}
+                onClick={() => setShowBuySurgeHourlyAdvanced(!showBuySurgeHourlyAdvanced)}
                 className="text-sm text-orange-400 hover:text-orange-300 transition-colors"
               >
-                {showBuySurgeAdvanced ? '收起 ▲' : '展开 ▼'}
+                {showBuySurgeHourlyAdvanced ? '收起 ▲' : '展开 ▼'}
               </button>
             </div>
+            
+            {showBuySurgeHourlyAdvanced && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    初始资金 (USDT) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeHourlyInitialCapital}
+                    onChange={(e) => setBuySurgeHourlyInitialCapital(e.target.value)}
+                    placeholder="例如: 10000"
+                    step="0.01"
+                    min="0"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                </div>
 
-            {/* 基础参数 */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-medium mb-2 text-orange-200">
-                  初始资金 (USDT) <span className="text-red-400">*</span>
-                </label>
-                <input
-                  type="number"
-                  value={buySurgeInitialCapital}
-                  onChange={(e) => setBuySurgeInitialCapital(e.target.value)}
-                  placeholder="例如: 10000"
-                  step="0.01"
-                  min="0"
-                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
-                />
-              </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    杠杆倍数 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeHourlyLeverage}
+                    onChange={(e) => setBuySurgeHourlyLeverage(e.target.value)}
+                    placeholder="例如: 4"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2 text-orange-200">
-                  杠杆倍数 <span className="text-red-400">*</span>
-                </label>
-                <input
-                  type="number"
-                  value={buySurgeLeverage}
-                  onChange={(e) => setBuySurgeLeverage(e.target.value)}
-                  placeholder="例如: 4"
-                  step="0.1"
-                  min="0"
-                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
-                />
-                <p className="text-xs text-orange-300 mt-1">默认4倍</p>
-              </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    建仓比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeHourlyPositionSizeRatio}
+                    onChange={(e) => setBuySurgeHourlyPositionSizeRatio(e.target.value)}
+                    placeholder="例如: 5"
+                    step="0.1"
+                    min="0"
+                    max="100"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">每次建仓金额占账户余额的百分比</p>
+                </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2 text-orange-200">
-                  建仓比例 (%) <span className="text-red-400">*</span>
-                </label>
-                <input
-                  type="number"
-                  value={buySurgePositionSizeRatio}
-                  onChange={(e) => setBuySurgePositionSizeRatio(e.target.value)}
-                  placeholder="例如: 5"
-                  step="0.1"
-                  min="0"
-                  max="100"
-                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
-                />
-                <p className="text-xs text-orange-300 mt-1">单次建仓占资金比例，默认5%</p>
-              </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    买量暴涨阈值（倍） <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeHourlyBuySurgeThreshold}
+                    onChange={(e) => setBuySurgeHourlyBuySurgeThreshold(e.target.value)}
+                    placeholder="例如: 2.0"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">某小时买量 vs 昨日平均小时买量的倍数</p>
+                </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2 text-orange-200">
-                  买量暴涨阈值 (倍) <span className="text-red-400">*</span>
-                </label>
-                <input
-                  type="number"
-                  value={buySurgeThreshold}
-                  onChange={(e) => setBuySurgeThreshold(e.target.value)}
-                  placeholder="例如: 20.0"
-                  step="0.1"
-                  min="0"
-                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
-                />
-                <p className="text-xs text-orange-300 mt-1">当日买量/昨日买量，默认20倍</p>
-              </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    买量暴涨倍数上限（倍） <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeHourlyBuySurgeMax}
+                    onChange={(e) => setBuySurgeHourlyBuySurgeMax(e.target.value)}
+                    placeholder="例如: 3.0"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">接受信号的买量倍数上限（默认2-3倍）</p>
+                </div>
 
-              <div>
-                <label className="block text-sm font-medium mb-2 text-orange-200">
-                  止盈比例 (%) <span className="text-red-400">*</span>
-                </label>
-                <input
-                  type="number"
-                  value={buySurgeTakeProfitPct}
-                  onChange={(e) => setBuySurgeTakeProfitPct(e.target.value)}
-                  placeholder="例如: 20"
-                  step="0.1"
-                  min="0"
-                  max="100"
-                  className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
-                />
-                <p className="text-xs text-orange-300 mt-1">基础止盈20%，动态调整可达30%</p>
-              </div>
-            </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    基础止盈比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeHourlyTakeProfitPct}
+                    onChange={(e) => setBuySurgeHourlyTakeProfitPct(e.target.value)}
+                    placeholder="例如: 33"
+                    step="0.1"
+                    min="0"
+                    max="100"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">基础止盈阈值（实际会根据动态止盈调整）</p>
+                </div>
 
-            {/* 高级参数 */}
-            {showBuySurgeAdvanced && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-orange-700">
                 <div>
                   <label className="block text-sm font-medium mb-2 text-orange-200">
                     补仓触发比例 (%) <span className="text-red-400">*</span>
                   </label>
                   <input
                     type="number"
-                    value={buySurgeAddPositionTriggerPct}
-                    onChange={(e) => setBuySurgeAddPositionTriggerPct(e.target.value)}
+                    value={buySurgeHourlyAddPositionTriggerPct}
+                    onChange={(e) => setBuySurgeHourlyAddPositionTriggerPct(e.target.value)}
                     placeholder="例如: -18"
                     step="0.1"
                     max="0"
                     className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
                   />
-                  <p className="text-xs text-orange-300 mt-1">价格下跌此比例时补仓，默认-18%</p>
+                  <p className="text-xs text-orange-300 mt-1">价格从平均成本下跌多少时触发补仓（负数）</p>
                 </div>
 
                 <div>
@@ -600,14 +1081,14 @@ export default function BacktestForm() {
                   </label>
                   <input
                     type="number"
-                    value={buySurgeStopLossPct}
-                    onChange={(e) => setBuySurgeStopLossPct(e.target.value)}
+                    value={buySurgeHourlyStopLossPct}
+                    onChange={(e) => setBuySurgeHourlyStopLossPct(e.target.value)}
                     placeholder="例如: -18"
                     step="0.1"
                     max="0"
                     className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
                   />
-                  <p className="text-xs text-orange-300 mt-1">补仓后基于新平均成本，默认-18%</p>
+                  <p className="text-xs text-orange-300 mt-1">止损阈值（负数）</p>
                 </div>
 
                 <div>
@@ -616,44 +1097,529 @@ export default function BacktestForm() {
                   </label>
                   <input
                     type="number"
-                    value={buySurgeMaxHoldHours}
-                    onChange={(e) => setBuySurgeMaxHoldHours(e.target.value)}
+                    value={buySurgeHourlyMaxHoldHours}
+                    onChange={(e) => setBuySurgeHourlyMaxHoldHours(e.target.value)}
                     placeholder="例如: 72"
                     step="1"
-                    min="1"
+                    min="0"
                     className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
                   />
-                  <p className="text-xs text-orange-300 mt-1">超过此时长强制平仓，默认72小时（3天）</p>
+                  <p className="text-xs text-orange-300 mt-1">超过此时间强制平仓（默认72小时=3天）</p>
                 </div>
 
                 <div>
                   <label className="block text-sm font-medium mb-2 text-orange-200">
-                    等待超时时间 (小时) <span className="text-red-400">*</span>
+                    等待超时时间（小时） <span className="text-red-400">*</span>
                   </label>
                   <input
                     type="number"
-                    value={buySurgeWaitTimeoutHours}
-                    onChange={(e) => setBuySurgeWaitTimeoutHours(e.target.value)}
+                    value={buySurgeHourlyWaitTimeoutHours}
+                    onChange={(e) => setBuySurgeHourlyWaitTimeoutHours(e.target.value)}
                     placeholder="例如: 48"
                     step="1"
-                    min="1"
+                    min="0"
                     className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
                   />
-                  <p className="text-xs text-orange-300 mt-1">信号后未达到目标跌幅则放弃，默认48小时</p>
+                  <p className="text-xs text-orange-300 mt-1">信号触发后多久未达到目标跌幅则放弃（默认48小时）</p>
+                </div>
+
+                <div>
+                  <label className="flex items-center text-sm font-medium mb-2 text-orange-200">
+                    <input
+                      type="checkbox"
+                      checked={buySurgeHourlyEnableTraderFilter}
+                      onChange={(e) => setBuySurgeHourlyEnableTraderFilter(e.target.checked)}
+                      className="mr-2 w-4 h-4"
+                    />
+                    启用顶级交易者过滤
+                  </label>
+                  <p className="text-xs text-orange-300 ml-6">基于Binance顶级交易者持仓数据筛选信号</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-orange-200">
+                    最小账户多空比 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeHourlyMinAccountRatio}
+                    onChange={(e) => setBuySurgeHourlyMinAccountRatio(e.target.value)}
+                    placeholder="例如: 0.70"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    className="w-full px-4 py-2 bg-orange-800/50 border border-orange-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 text-white"
+                  />
+                  <p className="text-xs text-orange-300 mt-1">账户多空比 {'>='} 此值才接受信号（0-1之间）</p>
                 </div>
               </div>
             )}
 
             {/* 策略说明 */}
             <div className="mt-4 pt-4 border-t border-orange-700">
-              <h4 className="font-bold mb-2 text-orange-200">买量暴涨策略特点：</h4>
+              <h4 className="font-bold mb-2 text-orange-200">买量暴涨策略（小时线优化版）特点：</h4>
               <ul className="space-y-1 text-sm text-orange-200 list-disc list-inside">
-                <li>信号识别：扫描所有USDT交易对，寻找当日主动买量 vs 昨日主动买量 ≥ 阈值（默认20倍）</li>
-                <li>信号过滤：检查信号触发前1小时涨幅（5%≤涨幅≤48.5%）</li>
-                <li>等待回调策略：根据买量倍数动态调整等待回调幅度（3%-6%）</li>
-                <li>动态止盈：基于建仓后2小时的价格表现动态调整止盈阈值（20%-30%）</li>
-                <li>补仓机制：价格下跌18%时补仓，重新计算平均成本</li>
+                <li>信号识别：扫描所有USDT交易对，寻找某小时主动买量 {'>='} 昨日平均小时买量 {'×'} 阈值（默认2倍）</li>
+                <li>顶级交易者风控：基于Binance顶级交易者持仓数据筛选信号（账户多空比 {'>='} 0.70）</li>
+                <li>等待回调策略：根据买量倍数动态调整等待回调幅度（2-3倍→15%，3-5倍→4%，5-10倍→3%）</li>
+                <li>动态止盈：基于建仓后2小时和12小时的价格表现动态调整止盈阈值（11%-30%）</li>
+                <li>虚拟补仓机制：价格下跌18%时虚拟补仓，调整止损/止盈基准（不实际追加资金）</li>
                 <li>快进快出：最大持仓72小时（3天）强制平仓</li>
+                <li>小时K线监控：使用小时K线数据精确监控，每小时检查一次止盈/止损条件</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {/* 买量暴涨策略 (V2 - PostgreSQL版) 参数 */}
+        {backtestType === 'buy-surge-v2' && (
+          <div className="bg-yellow-900/30 rounded-lg p-4 border border-yellow-700/50">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-yellow-200">策略参数 (V2 - PostgreSQL版)</h3>
+              <button
+                onClick={() => setShowBuySurgeV2Advanced(!showBuySurgeV2Advanced)}
+                className="text-sm text-yellow-400 hover:text-yellow-300 transition-colors"
+              >
+                {showBuySurgeV2Advanced ? '收起 ▲' : '展开 ▼'}
+              </button>
+            </div>
+            
+            {showBuySurgeV2Advanced && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    初始资金 (USDT) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2InitialCapital}
+                    onChange={(e) => setBuySurgeV2InitialCapital(e.target.value)}
+                    placeholder="例如: 10000"
+                    step="0.01"
+                    min="0"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    杠杆倍数 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2Leverage}
+                    onChange={(e) => setBuySurgeV2Leverage(e.target.value)}
+                    placeholder="例如: 4"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    建仓比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2PositionSizeRatio}
+                    onChange={(e) => setBuySurgeV2PositionSizeRatio(e.target.value)}
+                    placeholder="例如: 1"
+                    step="0.1"
+                    min="0"
+                    max="100"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                  <p className="text-xs text-yellow-300 mt-1">每次建仓金额占账户余额的百分比（建议1%）</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    买量暴涨阈值（倍） <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2BuySurgeThreshold}
+                    onChange={(e) => setBuySurgeV2BuySurgeThreshold(e.target.value)}
+                    placeholder="例如: 2.0"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    买量暴涨倍数上限（倍） <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2BuySurgeMax}
+                    onChange={(e) => setBuySurgeV2BuySurgeMax(e.target.value)}
+                    placeholder="例如: 10.0"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    基础止盈比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2TakeProfitPct}
+                    onChange={(e) => setBuySurgeV2TakeProfitPct(e.target.value)}
+                    placeholder="例如: 33"
+                    step="0.1"
+                    min="0"
+                    max="100"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    补仓触发比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2AddPositionTriggerPct}
+                    onChange={(e) => setBuySurgeV2AddPositionTriggerPct(e.target.value)}
+                    placeholder="例如: -18"
+                    step="0.1"
+                    max="0"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    止损比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2StopLossPct}
+                    onChange={(e) => setBuySurgeV2StopLossPct(e.target.value)}
+                    placeholder="例如: -18"
+                    step="0.1"
+                    max="0"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    最大持仓小时数 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2MaxHoldHours}
+                    onChange={(e) => setBuySurgeV2MaxHoldHours(e.target.value)}
+                    placeholder="例如: 72"
+                    step="1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    等待超时时间（小时） <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2WaitTimeoutHours}
+                    onChange={(e) => setBuySurgeV2WaitTimeoutHours(e.target.value)}
+                    placeholder="例如: 37"
+                    step="1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="flex items-center text-sm font-medium mb-2 text-yellow-200">
+                    <input
+                      type="checkbox"
+                      checked={buySurgeV2EnableTraderFilter}
+                      onChange={(e) => setBuySurgeV2EnableTraderFilter(e.target.checked)}
+                      className="mr-2 w-4 h-4"
+                    />
+                    启用顶级交易者过滤
+                  </label>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-yellow-200">
+                    最小账户多空比 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV2MinAccountRatio}
+                    onChange={(e) => setBuySurgeV2MinAccountRatio(e.target.value)}
+                    placeholder="例如: 0.84"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    className="w-full px-4 py-2 bg-yellow-800/50 border border-yellow-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500 text-white"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* 策略说明 */}
+            <div className="mt-4 pt-4 border-t border-yellow-700">
+              <h4 className="font-bold mb-2 text-yellow-200">买量暴涨策略 (V2) 特点：</h4>
+              <ul className="space-y-1 text-sm text-yellow-200 list-disc list-inside">
+                <li><strong>PostgreSQL 优化</strong>：适配最新的数据库架构，回测速度更快更稳定</li>
+                <li><strong>高并发低仓位</strong>：默认单笔 1% 仓位，最大 20 并发，充分发挥复利效应</li>
+                <li><strong>严格风控</strong>：默认账户多空比阈值 0.84，筛选更稳健的信号</li>
+                <li><strong>动态止盈</strong>：基于 2h/12h 表现自动调整止盈空间</li>
+                <li><strong>虚拟补仓</strong>：模拟补仓逻辑，降低回撤同时不增加额外资金占用</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {/* 买量暴涨策略 (V3 - 最新版) 参数 */}
+        {backtestType === 'buy-surge-v3' && (
+          <div className="bg-red-900/30 rounded-lg p-4 border border-red-700/50">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-red-200">策略参数 (V3 - 最新版)</h3>
+              <button
+                onClick={() => setShowBuySurgeV3Advanced(!showBuySurgeV3Advanced)}
+                className="text-sm text-red-400 hover:text-red-300 transition-colors"
+              >
+                {showBuySurgeV3Advanced ? '收起 ▲' : '展开 ▼'}
+              </button>
+            </div>
+            
+            {showBuySurgeV3Advanced && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    初始资金 (USDT) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3InitialCapital}
+                    onChange={(e) => setBuySurgeV3InitialCapital(e.target.value)}
+                    placeholder="例如: 10000"
+                    step="0.01"
+                    min="0"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    杠杆倍数 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3Leverage}
+                    onChange={(e) => setBuySurgeV3Leverage(e.target.value)}
+                    placeholder="例如: 4"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    建仓比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3PositionSizeRatio}
+                    onChange={(e) => setBuySurgeV3PositionSizeRatio(e.target.value)}
+                    placeholder="例如: 6"
+                    step="0.1"
+                    min="0"
+                    max="100"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                  <p className="text-xs text-red-300 mt-1">每次建仓金额占账户余额的百分比（建议6%）</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    买量暴涨阈值（倍） <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3BuySurgeThreshold}
+                    onChange={(e) => setBuySurgeV3BuySurgeThreshold(e.target.value)}
+                    placeholder="例如: 2.2"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    买量暴涨倍数上限（倍） <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3BuySurgeMax}
+                    onChange={(e) => setBuySurgeV3BuySurgeMax(e.target.value)}
+                    placeholder="例如: 3.0"
+                    step="0.1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    基础止盈比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3TakeProfitPct}
+                    onChange={(e) => setBuySurgeV3TakeProfitPct(e.target.value)}
+                    placeholder="例如: 33"
+                    step="0.1"
+                    min="0"
+                    max="100"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    补仓触发比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3AddPositionTriggerPct}
+                    onChange={(e) => setBuySurgeV3AddPositionTriggerPct(e.target.value)}
+                    placeholder="例如: -18"
+                    step="0.1"
+                    max="0"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    止损比例 (%) <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3StopLossPct}
+                    onChange={(e) => setBuySurgeV3StopLossPct(e.target.value)}
+                    placeholder="例如: -18"
+                    step="0.1"
+                    max="0"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    最大持仓小时数 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3MaxHoldHours}
+                    onChange={(e) => setBuySurgeV3MaxHoldHours(e.target.value)}
+                    placeholder="例如: 72"
+                    step="1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    等待超时时间（小时） <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3WaitTimeoutHours}
+                    onChange={(e) => setBuySurgeV3WaitTimeoutHours(e.target.value)}
+                    placeholder="例如: 37"
+                    step="1"
+                    min="0"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    并发持仓上限 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3MaxDailyPositions}
+                    onChange={(e) => setBuySurgeV3MaxDailyPositions(e.target.value)}
+                    placeholder="例如: 6"
+                    step="1"
+                    min="1"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="flex items-center text-sm font-medium mb-2 text-red-200">
+                    <input
+                      type="checkbox"
+                      checked={buySurgeV3EnableTraderFilter}
+                      onChange={(e) => setBuySurgeV3EnableTraderFilter(e.target.checked)}
+                      className="mr-2 w-4 h-4"
+                    />
+                    启用顶级交易者过滤
+                  </label>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    最小账户多空比 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3MinAccountRatio}
+                    onChange={(e) => setBuySurgeV3MinAccountRatio(e.target.value)}
+                    placeholder="例如: 0.84"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-red-200">
+                    账户多空比止损阈值
+                  </label>
+                  <input
+                    type="number"
+                    value={buySurgeV3AccountRatioStopThreshold}
+                    onChange={(e) => setBuySurgeV3AccountRatioStopThreshold(e.target.value)}
+                    placeholder="例如: -0.10"
+                    step="0.01"
+                    className="w-full px-4 py-2 bg-red-800/50 border border-red-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-white"
+                  />
+                  <p className="text-xs text-red-300 mt-1">如果账户多空比降至此值以下则止损</p>
+                </div>
+              </div>
+            )}
+
+            {/* 策略说明 */}
+            <div className="mt-4 pt-4 border-t border-red-700">
+              <h4 className="font-bold mb-2 text-red-200">买量暴涨策略 (V3) 特点：</h4>
+              <ul className="space-y-1 text-sm text-red-200 list-disc list-inside">
+                <li><strong>最新优化</strong>：集成所有最新的策略调整和Bug修复</li>
+                <li><strong>PostgreSQL 优化</strong>：完全适配 PostgreSQL 数据库架构</li>
+                <li><strong>顶级交易者风控</strong>：默认账户多空比阈值 0.84，更严格的筛选</li>
+                <li><strong>动态止盈</strong>：基于 2h/12h 表现自动调整止盈空间</li>
+                <li><strong>虚拟补仓</strong>：价格下跌触发虚拟补仓，调整止盈止损基准</li>
               </ul>
             </div>
           </div>
@@ -1134,7 +2100,12 @@ export default function BacktestForm() {
 
         {/* 运行按钮 */}
         <button
-          onClick={runBacktest}
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            runBacktest()
+          }}
           disabled={loading}
           className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition-colors"
         >
@@ -1151,7 +2122,10 @@ export default function BacktestForm() {
         {/* 结果显示 */}
         {result && (
           <div className="p-6 bg-gray-600/50 rounded-lg border border-gray-500 space-y-4">
-            <h3 className="text-lg font-bold mb-4">回测结果</h3>
+            <h3 className="text-lg font-bold mb-4">
+              回测结果
+              {result.strategy && <span className="text-sm text-gray-400 ml-2">({result.strategy})</span>}
+            </h3>
             
             {/* 主要指标 */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1240,6 +2214,211 @@ export default function BacktestForm() {
                 <span className="ml-2 font-mono">{result.csv_filename}</span>
               </div>
             )}
+
+            {/* 🆕 详细统计信息（仅买量暴涨策略） */}
+            {(backtestType === 'buy-surge-hourly' || backtestType === 'buy-surge-v2') && result.detailed_statistics && (
+              <div className="mt-6 space-y-4">
+                <h4 className="text-lg font-bold text-orange-400">📊 详细统计</h4>
+                
+                {/* 止盈统计 */}
+                {result.detailed_statistics.take_profit_stats && (
+                  <div className="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+                    <h5 className="font-bold mb-3 text-green-400">💰 止盈触发统计</h5>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                      {result.detailed_statistics.take_profit_stats.high_tp && (
+                        <div>
+                          <div className="text-gray-400">动态止盈({'>'}10%)</div>
+                          <div className="text-lg font-bold text-green-400">
+                            {result.detailed_statistics.take_profit_stats.high_tp.count}次
+                            ({result.detailed_statistics.take_profit_stats.high_tp.percentage}%)
+                          </div>
+                          {result.detailed_statistics.take_profit_stats.high_tp.success_count !== undefined && (
+                            <div className="text-xs text-gray-300 mt-1">
+                              成功: {result.detailed_statistics.take_profit_stats.high_tp.success_count}次
+                              ({result.detailed_statistics.take_profit_stats.high_tp.success_rate}%)
+                            </div>
+                          )}
+                          {result.detailed_statistics.take_profit_stats.high_tp.total_profit !== undefined && (
+                            <div className="text-xs text-green-300 mt-1">
+                              总贡献: ${result.detailed_statistics.take_profit_stats.high_tp.total_profit.toFixed(2)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {result.detailed_statistics.take_profit_stats.normal_tp && (
+                        <div>
+                          <div className="text-gray-400">普通止盈({'<='}10%)</div>
+                          <div className="text-lg font-bold text-blue-400">
+                            {result.detailed_statistics.take_profit_stats.normal_tp.count}次
+                            ({result.detailed_statistics.take_profit_stats.normal_tp.percentage}%)
+                          </div>
+                          {result.detailed_statistics.take_profit_stats.normal_tp.total_profit !== undefined && (
+                            <div className="text-xs text-blue-300 mt-1">
+                              总贡献: ${result.detailed_statistics.take_profit_stats.normal_tp.total_profit.toFixed(2)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {result.detailed_statistics.take_profit_stats.other_exits && (
+                        <div>
+                          <div className="text-gray-400">其他平仓</div>
+                          <div className="text-lg font-bold text-gray-400">
+                            {result.detailed_statistics.take_profit_stats.other_exits.count}次
+                            ({result.detailed_statistics.take_profit_stats.other_exits.percentage}%)
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 止损统计 */}
+                {(result.detailed_statistics.stop_loss || result.detailed_statistics.stop_loss_trader) && (
+                  <div className="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+                    <h5 className="font-bold mb-3 text-red-400">⚠️ 止损统计</h5>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                      {result.detailed_statistics.stop_loss && (
+                        <div>
+                          <div className="text-gray-400">价格止损</div>
+                          <div className="text-lg font-bold text-red-400">
+                            {result.detailed_statistics.stop_loss.count}次
+                            ({result.detailed_statistics.stop_loss.percentage}%)
+                          </div>
+                          {result.detailed_statistics.stop_loss.total_loss !== undefined && (
+                            <div className="text-xs text-red-300 mt-1">
+                              总损失: ${result.detailed_statistics.stop_loss.total_loss.toFixed(2)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {result.detailed_statistics.stop_loss_trader && (
+                        <div>
+                          <div className="text-gray-400">顶级交易者止损</div>
+                          <div className="text-lg font-bold text-yellow-400">
+                            {result.detailed_statistics.stop_loss_trader.count}次
+                            ({result.detailed_statistics.stop_loss_trader.percentage}%)
+                          </div>
+                          {(result.detailed_statistics.stop_loss_trader.total_loss !== undefined || result.detailed_statistics.stop_loss_trader.avg_loss !== undefined) && (
+                            <div className="text-xs text-yellow-300 mt-1">
+                              {result.detailed_statistics.stop_loss_trader.total_loss !== undefined && (
+                                <>总损失: ${result.detailed_statistics.stop_loss_trader.total_loss.toFixed(2)}</>
+                              )}
+                              {result.detailed_statistics.stop_loss_trader.total_loss !== undefined && result.detailed_statistics.stop_loss_trader.avg_loss !== undefined && ' '}
+                              {result.detailed_statistics.stop_loss_trader.avg_loss !== undefined && (
+                                <>(平均: ${result.detailed_statistics.stop_loss_trader.avg_loss.toFixed(2)}/笔)</>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 超时和强制平仓统计 */}
+                {(result.detailed_statistics.max_hold_timeout || result.detailed_statistics.force_close) && (
+                  <div className="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+                    <h5 className="font-bold mb-3 text-orange-400">⏰ 超时与强制平仓</h5>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                      {result.detailed_statistics.max_hold_timeout && (
+                        <div>
+                          <div className="text-gray-400">超时平仓</div>
+                          <div className="text-lg font-bold text-orange-400">
+                            {result.detailed_statistics.max_hold_timeout.count}次
+                            ({result.detailed_statistics.max_hold_timeout.percentage}%)
+                          </div>
+                          {(result.detailed_statistics.max_hold_timeout.positive_count !== undefined || result.detailed_statistics.max_hold_timeout.negative_count !== undefined) && (
+                            <div className="text-xs text-gray-300 mt-1">
+                              盈利: {result.detailed_statistics.max_hold_timeout.positive_count}次,
+                              亏损: {result.detailed_statistics.max_hold_timeout.negative_count}次
+                            </div>
+                          )}
+                          {result.detailed_statistics.max_hold_timeout.total_pnl !== undefined && (
+                            <div className="text-xs text-orange-300 mt-1">
+                              总盈亏: ${result.detailed_statistics.max_hold_timeout.total_pnl.toFixed(2)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {result.detailed_statistics.force_close && (
+                        <div>
+                          <div className="text-gray-400">强制平仓</div>
+                          <div className="text-lg font-bold text-purple-400">
+                            {result.detailed_statistics.force_close.count}次
+                            ({result.detailed_statistics.force_close.percentage}%)
+                          </div>
+                          {(result.detailed_statistics.force_close.positive_count !== undefined || result.detailed_statistics.force_close.negative_count !== undefined) && (
+                            <div className="text-xs text-gray-300 mt-1">
+                              盈利: {result.detailed_statistics.force_close.positive_count}次,
+                              亏损: {result.detailed_statistics.force_close.negative_count}次
+                            </div>
+                          )}
+                          {result.detailed_statistics.force_close.total_pnl !== undefined && (
+                            <div className="text-xs text-purple-300 mt-1">
+                              总盈亏: ${result.detailed_statistics.force_close.total_pnl.toFixed(2)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 🆕 信号记录列表（仅买量暴涨策略） */}
+            {(backtestType === 'buy-surge-hourly' || backtestType === 'buy-surge-v2') && result.signal_records && result.signal_records.length > 0 && (
+              <div className="mt-6 border-t border-gray-600 pt-6">
+                <h4 className="text-lg font-bold mb-4 text-blue-400 flex items-center">
+                  <span className="mr-2">🔔</span> 信号监控日志 (最近100条)
+                </h4>
+                <div className="bg-gray-900/80 rounded-lg p-4 font-mono text-sm max-h-[500px] overflow-y-auto border border-gray-700">
+                  {result.signal_records.slice(0, 100).map((signal, index) => {
+                    const signalHour = signal.signal_time ? 
+                      new Date(signal.signal_time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''
+                    const entryHour = signal.earliest_entry_time ? 
+                      new Date(signal.earliest_entry_time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''
+                    
+                    // 只显示通过筛选的信号（有账户多空比且状态不是filtered_trader）
+                    const showTraderFilter = signal.account_ratio !== null && 
+                                            signal.account_ratio !== undefined && 
+                                            signal.status !== 'filtered_trader'
+                    
+                    return (
+                      <div key={index} className="mb-2">
+                        {showTraderFilter && signal.account_ratio !== null && signal.account_ratio !== undefined && (
+                          <div className="text-green-400 mb-0.5">
+                            ✅ 通过顶级交易者筛选: {signal.symbol} 账户多空比={signal.account_ratio.toFixed(4)}
+                          </div>
+                        )}
+                        <div className="text-blue-400">
+                          🔔 新信号: {signal.symbol} @{signalHour} 买量{signal.buy_surge_ratio.toFixed(2)}倍，可建仓时间: {entryHour}
+                        </div>
+                        {signal.status === 'filtered_trader' && (
+                          <div className="text-yellow-400 text-xs ml-4">
+                            🚫 {signal.note || '被顶级交易者筛选过滤'}
+                          </div>
+                        )}
+                        {signal.status === 'filled' && signal.entry_time && (
+                          <div className="text-green-300 text-xs ml-4">
+                            ✓ 已建仓: {signal.entry_time} @ {signal.entry_price}
+                          </div>
+                        )}
+                        {signal.status === 'unfilled' && (
+                          <div className="text-gray-400 text-xs ml-4">
+                            ⏱️ 未成交: {signal.note || '回测区间内未触发目标价'}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="mt-3 text-xs text-gray-400">
+                  共 {result.signal_records.length} 个信号记录
+                </div>
+              </div>
+            )}
+
           </div>
         )}
       </div>
